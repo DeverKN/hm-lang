@@ -1,0 +1,9 @@
+:let msg = "Hello World" :in
+  :let  id :: (a -> a)
+        id x = x :in 
+        :let (id, temp) = id 5 :in
+        :drop temp;
+        5;
+        :let (id, msg) = id msg :in
+        :unclos id -> [];
+        msg

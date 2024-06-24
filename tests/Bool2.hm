@@ -1,0 +1,8 @@
+:data Bool = True | False :in
+
+:let msg = "woooow!!" :in
+:let (True, b) = True () :in
+  :case b :of
+   | True nothing -> :drop nothing; msg
+   | False nothing -> :drop nothing; "epic fail!! XD"
+  :end

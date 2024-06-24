@@ -1,0 +1,7 @@
+:let makeRef :: (a -> <#unique, 1 * Ref a>)
+     makeRef a = 
+          :let ref = :ref a :in
+          :abstract ref :in
+      :let (makeRef, ref) = makeRef "test" :in
+      :drop makeRef;
+      ref  

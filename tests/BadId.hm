@@ -1,0 +1,5 @@
+:let 
+  id :: (a -> a)
+  id x = 5 
+    :in
+  id

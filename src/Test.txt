@@ -1,0 +1,28 @@
+
+∀ a[0] env[0] a[1]. 
+
+Owned<1, Owned<∃ addr[2], (#List (var a[1]))> -> Owned<∃ addr[3], env[0] | (var a[1]) -> ()> -> Owned<∃ addr[0], (Owned<∃ addr[1], env[0] | (var a[1]) -> ()>, ())>>
+
+∀ a[2] env[1] a[3]. 
+Owned<1, Owned<∃ addr[6], (#List (var a[3]))> -> Owned<∃ addr[7], env[1] | (var a[3]) -> ()> -> Owned<∃ addr[4], (Owned<∃ addr[5], env[1] | (var a[3]) -> ()>, ())>>
+
+∀ env[1] a[0] a[3]. 
+
+Owned<1, ∃ addr[2] a[3]. Owned<addr[2], (#List (var a[3]))> -> ∃ addr[3] a[3]. Owned<addr[3], env[1] | (var a[3]) -> ()> -> ∃ addr[0] a[3]. Owned<addr[0], (∃ addr[1] a[3]. Owned<addr[1], env[1] | (var a[3]) -> ()>, ())>>
+
+unifying:
+∀ a[0] env[0] a[1]. 
+Owned<1, 
+  Owned<∃ addr[2], (#List (var a[1]))> 
+  -> Owned<∃ addr[3], env[0] | (var a[1]) -> ()> 
+  -> Owned<∃ addr[0], (Owned<∃ addr[1], env[0] | (var a[1]) -> ()>, ())>>
+
+with: 
+∀ a[2] b[0] c[0] d[0]. 
+  Frac<d[0], c[0] * (a[2] | Owned<∃ addr[4], (#List #Number)> -> Owned<∃ a[3], #Number -> ()> -> (var b[0]))>
+
+∀ a[0] env[0] a[1]. Owned<1, Owned<∃ addr[1], (#List (var a[1]))> -> Owned<∃ addr[2], env[0] | (var a[1]) -> ()> -> Owned<∃ addr[0], env[0] | (var a[1]) -> ()>>
+∀ a[2] env[1] a[3]. Owned<1, Owned<∃ addr[4], (#List (var a[3]))> -> Owned<∃ addr[5], env[1] | (var a[3]) -> ()> -> Owned<∃ addr[3], env[1] | (var a[3]) -> ()>>
+
+∀ a[0] env[0] a[1]. Owned<1, Owned<∃ addr[1], (#List (var a[1]))> -> Owned<∃ addr[2], env[0] | (var a[1]) -> ()> -> Owned<∃ addr[0], env[0] | (var a[1]) -> ()>>
+∀ a[2] env[1] a[3]. Owned<1, Owned<∃ addr[4], (#List (var a[3]))> -> Owned<∃ addr[5], env[1] | (var a[3]) -> ()> -> Owned<∃ addr[3], env[1] | (var a[3]) -> ()>>

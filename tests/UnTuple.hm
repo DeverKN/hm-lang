@@ -1,0 +1,4 @@
+:let tup = (1, "test") :in
+:let (a, b) = tup :in
+:drop b;
+a

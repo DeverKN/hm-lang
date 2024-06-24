@@ -1,0 +1,6 @@
+:let makeRefBad :: (<a, 1 * Ref a> -> <#unique, 1 * Ref a>)
+     makeRefBad a = a :in
+      :let (makeRefBad, ref) = makeRefBad "test" :in
+      :drop makeRefBad;
+      ref
+      

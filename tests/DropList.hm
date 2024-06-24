@@ -1,0 +1,29 @@
+:data List a = Cons a <#unique, 1 * (List a)> | Nil :in
+
+:letrec
+  dropList :: (<#unique, 1 * (List a)> -> <#unique, 1 * ([env] a -> ())> -> <#unique, 1 * ([env] a -> ())>)
+  dropList xs dropX = 
+    :case xs :of
+    | (Cons x xs) -> :let dropX = :unabstract dropX :in
+                     :let (dropX, unit) = dropX x :in unit; 
+                     :let dropX = :abstract dropX :in
+                     :let (dropList, res) = dropList xs dropX :in
+                     res
+    | (Nil unit) -> :drop unit; 
+                     dropX
+    :end
+:in
+
+:let 
+  dropNum :: (Number -> ())
+  dropNum num = :drop num
+:in
+
+:let (Nil, end) = Nil () :in
+  :let (Cons, list) = Cons 5 end :in
+    :let dropNum = :abstract dropNum :in
+    :let (dropList, dropNum) = dropList list dropNum :in
+      :let dropNum = :unabstract dropNum :in
+      :drop dropList; 
+      :drop dropNum;
+      ()

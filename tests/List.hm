@@ -1,0 +1,5 @@
+:data List a = Cons a <#unique, 1 * (List a)> | Nil :in
+
+:let (Nil, end) = Nil () :in
+  :let (Cons, list) = Cons 5 end :in
+    list
