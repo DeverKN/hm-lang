@@ -110,7 +110,7 @@ data ASTNode
   | CaptureNode ASTPos LiteralOrName
   | TupleIndexNode ASTPos LiteralOrName LiteralOrName
   -- | TupleIndexMoveNode ASTPos LiteralOrName LiteralOrName
-  | UnClosNode ASTPos LiteralOrName [LiteralOrName]
+  | UnClosNode ASTPos LiteralOrName --[LiteralOrName]
   | RebalanceNode ASTPos [LiteralOrName]
   | AbstractNode ASTPos LiteralOrName
   | UnabstractNode ASTPos LiteralOrName
@@ -153,7 +153,7 @@ getLoc (AbstractNode loc _) = loc
 getLoc (UnabstractNode loc _) = loc
 getLoc (RebalanceNode loc _) = loc
 getLoc (TupleIndexNode loc _ _) = loc
-getLoc (UnClosNode loc _ _) = loc
+getLoc (UnClosNode loc _) = loc
 
 spaces1 :: Parser ()
 spaces1 = void (many1 space)
@@ -970,15 +970,15 @@ parseUnClos = do
   string ":unclos"
   spaces1
   clos <- parseLiteral
-  spaces
-  string "->"
-  spaces
-  char '['
-  vals <- sepBy parseLiteral spaces1
-  spaces
-  char ']'
+  -- spaces
+  -- string "->"
+  -- spaces
+  -- char '['
+  -- vals <- sepBy parseLiteral spaces1
+  -- spaces
+  -- char ']'
   end <- getPosition
-  return $ UnClosNode (start, end) clos vals
+  return $ UnClosNode (start, end) clos
 
 parseRebalence :: Parser ASTNode
 parseRebalence = do

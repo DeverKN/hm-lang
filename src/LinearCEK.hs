@@ -71,9 +71,10 @@ data Term
   | Semicolon ASTLoc Term Term
   | DataTypeDeclaration ASTLoc String [String] [Constructor] Term
   | Rebalance ASTLoc [Simple]
-  | UnClos ASTLoc [Simple] Simple
+  | UnClos ASTLoc Simple
   | Abstract ASTLoc Simple
   | Unabstract ASTLoc Simple
+  -- | Alias ASTLoc Simple
   deriving (-- | Cast
             Show)
 
@@ -105,9 +106,10 @@ instance HasLoc Term where
   getLoc (Semicolon pos _ _) = pos
   getLoc (DataTypeDeclaration pos _ _ _ _) = pos
   getLoc (Rebalance pos _) = pos
-  getLoc (UnClos pos _ _) = pos
+  getLoc (UnClos pos _) = pos
   getLoc (Abstract pos _) = pos
   getLoc (Unabstract pos _) = pos
+  -- getLoc (Alias pos _) = pos
 
 instance HasLoc Simple where
   getLoc (Variable pos _) = pos

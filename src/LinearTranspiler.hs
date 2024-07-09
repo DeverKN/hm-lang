@@ -73,7 +73,7 @@ getFreeVariables (SemicolonNode _ node1 node2) = getFreeVariables node1 `merge` 
 getFreeVariables (LiteralNode _ lit) = getFreeVariablesLiteral lit
 getFreeVariables (CaptureNode _ lit) = getFreeVariablesLiteral lit
 getFreeVariables (TupleIndexNode _ tuple index) = getFreeVariablesLiteral tuple `merge` getFreeVariablesLiteral index
-getFreeVariables (UnClosNode _ clos holders) = getFreeVariablesLiteral clos `merge` foldr (merge . getFreeVariablesLiteral) [] holders
+getFreeVariables (UnClosNode _ clos) = getFreeVariablesLiteral clos --`merge` foldr (merge . getFreeVariablesLiteral) [] holders
 getFreeVariables (ApplicationNode _ rator rands) = getFreeVariablesLiteral rator `merge` foldr (merge . getFreeVariablesArgument) [] rands
 getFreeVariables (ParallelNode _ branches) = foldr (merge . getFreeVariables) [] branches
 getFreeVariables (DataNode _ _ _ constructors body) = getFreeVariables body `minus` map fst constructors
@@ -198,11 +198,11 @@ transpile (LiteralNode pos lit) = do
   return $ Literal pos lit
 transpile (CaptureNode _ _) = error "CaptureNode not allowed"
 transpile (TupleIndexNode _ tuple index) = error "Tuple indexing notation is currently unsupported"
-transpile (UnClosNode pos clos holders) = do
+transpile (UnClosNode pos clos) = do
   pos <- convertPos pos
-  holders <- mapM transpileLiteral holders
+  -- holders <- mapM transpileLiteral holders
   clos <- transpileLiteral clos
-  return $ UnClos pos holders clos
+  return $ UnClos pos clos
 transpile (ApplicationNode pos rator rands) = do
   pos <- convertPos pos
   rator <- transpileLiteral rator

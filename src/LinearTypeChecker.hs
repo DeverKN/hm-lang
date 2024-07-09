@@ -690,23 +690,15 @@ synthesize env (Share pos eRef) = do
     (TyFrac frac@(AbstractFrac (Just 1) []) address (TyApp (TyCon "CooperativeRef") ty)) -> return (TyFrac frac address (TyApp refType ty), env)
     (TyFrac frac _ _) -> throwError (SharePartialRef pos eRef frac)
     notRef -> throwError (NotARef pos notRef eRef)
-synthesize env (UnClos pos envEs eClos) = do
+synthesize env (UnClos pos eClos) = do
   (clos, env) <- synthesizeSimple env eClos
   unClosHelper env clos
   where
+    unClosHelper :: TypeCheckerEnv -> Type -> TypeCheckerResult (Type, TypeCheckerEnv)
     unClosHelper env (TySchema _ ty) = unClosHelper env ty
-    unClosHelper env (TyFrac (AbstractFrac (Just 1) []) _ (TyArrow closEnv@(CaptureEnv captures) _ _)) = do
-      (tys, env) <-
-        foldM
-          ( \(tys, env) (capTy, e) -> do
-              (ty, env) <- mergeHelper env capTy e
-              return (ty : tys, env)
-          )
-          ([], env)
-          (zip captures envEs)
-      return (tuple tys, env)
+    unClosHelper env (TyFrac (AbstractFrac (Just 1) []) _ (TyArrow closEnv@(CaptureEnv captures) _ _)) = return (tuple captures, env)
     unClosHelper env (TyFrac _ _ (TyArrow closEnv@(CaptureEnvVar _) _ _)) = throwError (UnClosPolyEnv pos eClos closEnv)
-    unClosHelper env (TyFrac _ _ (TyArrow closEnv@(CaptureEnvVar _) _ _)) = throwError (UnClosPartial pos eClos)
+    -- unClosHelper env (TyFrac _ _ (TyArrow closEnv@(CaptureEnvVar _) _ _)) = throwError (UnClosPartial pos eClos)
     unClosHelper env notRef = throwError (NotAClosure pos notRef eClos)
 synthesize env (Acquire pos ref name body) = do
   (refType, env) <- synthesizeSimple env ref

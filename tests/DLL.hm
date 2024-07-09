@@ -1,2 +1,3 @@
-:data DLL a = DLLCons <#unique, .5 * (DLL a)> <#unique, 1 * (Ref a)> <#unique, .5 * (DLL a)> | DLLStart <#unique, .5 * (DLL a)> <#unique, .5 * (DLL a)> | DLLEnd <#unique, .5 * (DLL a)> <#unique, .5 * (DLL a)> :in
-DCons
+:data DLLNode a = DLLCons <#unique, 1 * (<#unique, .5 * (DLL a)>)> <#unique, 1 * (Ref a)> <#unique, 1 * (<#unique, .5 * (DLL a)>)> | DLLnil :in
+:data DLL = 
+DLLCons
