@@ -13,11 +13,11 @@ import Control.Monad.State.Lazy (runState)
 import Data.Functor ((<&>))
 import Data.List (delete, deleteBy, union, intercalate)
 import LinearCEK (Pattern (..), Simple (..), Term (..), ASTLoc (ASTLoc), HasLoc (getLoc), Branch (Branch), File (..), printLoc, fancyPrintLoc)
-import LinearParser (parseFile)
-import LinearTranspiler (transpileProgram)
+import LinearParser (parseFile, ASTNode)
+import LinearTranspiler (transpileProgram, TypeTranspilerError (WrongArity, UnknownType))
 import Pretty (Pretty (pretty))
 import System.IO (IOMode (ReadMode), hGetContents, openFile)
-import Types (AbstractAddress (..), AbstractFrac (..), CaptureEnv (..), Type (..), UnificationResult, arity, eqType, genQName, instantiate, number, paramTypes, returnType, tuple, unify, (|*|), (|+|), (|/|), pattern AbstractNum, pattern AbstractVar, pattern CooperativeRef, pattern CooperativeRefType, pattern Ref, pattern Tuple, pattern Unit, AbstractExpr (Var), constructorFieldTypes, getQuantifiedVars, OverallUnificationResult, UnificationError, pattern FreshVarName, VarName, genQName')
+import Types (AbstractAddress (..), AbstractFrac (..), CaptureEnv (..), Type (..), UnificationResult, arity, eqType, genQName, instantiate, number, paramTypes, returnType, tuple, unify, (|*|), (|+|), (|/|), pattern AbstractNum, pattern AbstractVar, pattern CooperativeRef, pattern CooperativeRefType, pattern Ref, pattern Tuple, pattern Unit, AbstractExpr (Var), constructorFieldTypes, getQuantifiedVars, OverallUnificationResult, UnificationError, pattern FreshVarName, VarName, genQName', RawType)
 import qualified Types as UnificationError(UnificationError(..))
 import Debug.Trace (traceM)
 import Data.Foldable (forM_)
@@ -65,7 +65,13 @@ data TypeCheckerError
   | CircularUnification ASTLoc
   | InvalidDropType ASTLoc Type
   | InvalidAbstract ASTLoc Type
+  | UnboundType ASTLoc String
+  | WrongTypeArity ASTLoc RawType Int [RawType]
   deriving (Show)
+
+convertTypeTranspilerError :: TypeTranspilerError -> TypeCheckerError
+convertTypeTranspilerError (WrongArity loc ty arity args) = WrongTypeArity loc ty arity args
+convertTypeTranspilerError (UnknownType loc ty) = UnboundType loc ty
 
 hideBaseBindings :: TypeCheckerEnv -> TypeCheckerEnv
 hideBaseBindings env = case evalStateT (elimBindings undefined baseTypeBindings env) 0 of
@@ -110,9 +116,11 @@ forEachAndRestM_ f as = void $ forEachAndRestM f as
 convertCaseBodyMismatch :: [(ASTLoc, TypeCheckerEnv)] -> Either EnvMismatchResult ()
 -- convertCaseBodyMismatch [] = return ()
 convertCaseBodyMismatch = forEachAndRestM_ helper
-  where helper (firstLoc, (firstEnv, _)) rest = do
+  where 
+    helper :: (ASTLoc, TypeCheckerEnv) -> [(ASTLoc, TypeCheckerEnv)] -> Either EnvMismatchResult ()
+    helper (firstLoc, (firstEnv, _)) rest = do
                                           let restLocs = map fst rest
-                                          let restEnvs = map (fst . snd) rest
+                                          let restEnvs = map (getVarTyEnv . snd) rest
                                           forM_ (zip restLocs restEnvs) (uncurry (convertCaseBodyMismatchHelper firstLoc firstEnv))
                                           convertCaseBodyMismatch rest
 
@@ -131,7 +139,7 @@ convertCaseBodyMismatch = forEachAndRestM_ helper
 --   convertCaseBodyMismatch rest
 
 makeCaseBodyMismatchMsg :: [(ASTLoc, TypeCheckerEnv)] -> String
-makeCaseBodyMismatchMsg bodies = case fromLeft (error $ "case body mismatch has no errors for bodies: " ++ pretty (map (fst . snd) bodies)) (convertCaseBodyMismatch bodies) of
+makeCaseBodyMismatchMsg bodies = case fromLeft (error $ "case body mismatch has no errors for bodies: " ++ pretty (map (getVarTyEnv . snd) bodies)) (convertCaseBodyMismatch bodies) of
                                     MismatchedUse varName usedBranch unusedBranch -> varName ++ " was used in this branch:\n" ++ fancyPrintLoc usedBranch ++ "\nbut not this branch:\n" ++ fancyPrintLoc unusedBranch
                                     MismatchedType varName (branch1, ty1) (branch2, ty2) err -> varName ++ " has type " ++ pretty ty1 ++ " in this branch:\n" ++ fancyPrintLoc branch1 ++ "\nBut type " ++ pretty ty2 ++ " in this branch:\n" ++ fancyPrintLoc branch2 ++ "These aren't the same because:\n" ++ pretty err
                                     -- catch -> undefined
@@ -157,10 +165,20 @@ instance Pretty TypeCheckerError where
   pretty (NonEmptyEnv loc env) = "Final environment isn't empty, the following variables are unused: " ++ pretty env ++ ". Problem occurs here:\n" ++ fancyPrintLoc loc
   pretty (UnboundName loc name) = "Unbound variable: " ++ name ++ " used here:\n" ++ fancyPrintLoc loc
   pretty (InvalidDropType loc ty) = "Cannot drop variable of type: " ++ pretty ty ++ " here:\n" ++ fancyPrintLoc loc
+  pretty (UnboundType loc ty) = "Unbound type name: " ++ pretty ty ++ " here:\n" ++ fancyPrintLoc loc
   -- pretty (UnificationErr loc ty1 ty2) = "Type mismatch, expected: " ++ pretty ty2 ++ " but got " ++ pretty ty1 ++ " at " ++ printLoc loc
   pretty x = show x
 
 type TypeCheckerEnv = ([(String, Type)], [VarName])
+
+getVarTyEnv :: TypeCheckerEnv -> [(String, Type)]
+getVarTyEnv (a, _) = a
+
+getVarNameEnv :: TypeCheckerEnv -> [VarName]
+getVarNameEnv (_, a) = a
+
+-- getTypeEnv :: TypeCheckerEnv -> TypeEnv
+-- getTypeEnv (_, _, a) = a
 
 type TypeCheckerState = Int
 
@@ -352,7 +370,7 @@ sameEnv (x : xs) ys
 allSameEnv :: [TypeCheckerEnv] -> Bool
 allSameEnv [] = True
 allSameEnv [_] = True
-allSameEnv (first : rest) = all (sameEnv (fst first) . fst) rest
+allSameEnv (first : rest) = all (sameEnv (getVarTyEnv first) . getVarTyEnv) rest
 
 checkBranchEnvs :: ASTLoc -> Term -> [(ASTLoc, TypeCheckerEnv)] -> TypeCheckerResult ()
 checkBranchEnvs loc term bodies = case convertCaseBodyMismatch bodies of
@@ -387,7 +405,7 @@ genAddress = do
 -- instantiateParameterType ty = return ty
 
 instantiateSchemaType :: (Monad m) => TypeCheckerEnv -> Type -> TypeCheckerStateT m (Type, TypeCheckerEnv)
-instantiateSchemaType (tyEnv, state) ty = let (ty', skEnv) = runState (instantiate ty) state in return (ty', (tyEnv, skEnv))
+instantiateSchemaType (varTyEnv, state) ty = let (ty', skEnv) = runState (instantiate ty) state in return (ty', (varTyEnv, skEnv))
 
 -- instantiateSchemaType renames (TyVar name) | name `elem` map fst renames = return (fromJust (lookup name renames))
 -- instantiateSchemaType renames (TySchema name) | name `elem` map fst renames = return (fromJust (lookup name renames))
@@ -642,7 +660,7 @@ synthesize env (DerefIn pos name eRef body) = do
     (TyFrac frac _ ty) -> do
       let refVal = handleDeref ty frac
       (bodyTy, env) <- synthesize (extendEnv1 env (name, refVal)) body
-      case lookup name (fst env) of
+      case lookup name (getVarTyEnv env) of
         Just endingTy -> unless (ty == endingTy) (throwError (DerefInConsumed pos))
         Nothing -> throwError (DerefInConsumed pos)
       return (bodyTy, env)
@@ -670,7 +688,9 @@ synthesize env (DataTypeDeclaration pos tyName qNamesRaw constructors body) = do
           )
           constructors
   -- traceM (pretty constructorTypes)
+  traceM $ "typechecking datatype body for " ++ tyName
   (ty, env) <- synthesize (extendEnv env constructorTypes) body
+  traceM $ "typechecked datatype body for " ++ tyName
   -- trace ("b4" ++ show env) (return ())
   env <- foldM (\env (name, ty) -> elimBindingOptional pos name ty env) env constructorTypes
   -- trace ("after: " ++ show env) (return ())
@@ -747,6 +767,9 @@ synthesize env (Rebalance pos (e : es)) = do
         (TyFrac frac eAddr _)
           | eAddr /= addr -> throwError (AddressMismatch pos addr eAddr)
           | otherwise -> rebalanceHelper addr env es >>= \(env, newFrac) -> return (env, frac |+| newFrac)
+-- synthesize env (TypeSynonym pos name qNames ty body) = do
+--   synthesize env body
+
 
 mergeHelper :: TypeCheckerEnv -> Type -> Simple -> TypeCheckerResult (Type, TypeCheckerEnv)
 mergeHelper env (TyFrac frac1 addr refTy) e = do
@@ -885,7 +908,7 @@ baseTypeCheckerEnv :: TypeCheckerEnv
 baseTypeCheckerEnv = (baseTypeBindings, [])
 
 elimUnits :: TypeCheckerEnv -> TypeCheckerEnv
-elimUnits (tyEnv, skEnv) = (filter (\(_, ty) -> ty /= Unit) tyEnv, skEnv)
+elimUnits (varTyEnv, skEnv) = (filter (\(_, ty) -> ty /= Unit) varTyEnv, skEnv)
 
 checkProgram :: Term -> TypeCheckerResult Type
 checkProgram program = do
@@ -893,7 +916,7 @@ checkProgram program = do
   -- trace (show env) (return ())
   env <- elimBindings (getLoc program) baseTypeBindings env
   -- trace (show env) (return ())
-  if null (fst env) then return ty else throwError (NonEmptyEnv (getLoc program) env)
+  if null (getVarTyEnv env) then return ty else throwError (NonEmptyEnv (getLoc program) env)
 
 runTypeChecker :: (Pretty a) => TypeCheckerResult a -> String
 runTypeChecker res = case evalStateT res 0 of
@@ -914,13 +937,19 @@ runTypeChecker res = case evalStateT res 0 of
 
 -- test = runTypeChecker $ checkProgram applicationTestProgram
 
+transpileAndCheck :: File -> ASTNode -> TypeCheckerResult Type
+transpileAndCheck file program = case transpileProgram file program of
+                          (Left err) -> throwError (convertTypeTranspilerError err)
+                          (Right program) -> checkProgram program
+  
+
 checkFile :: String -> IO String
 checkFile fileName = do
   handle <- openFile fileName ReadMode
   src <- hGetContents handle
   case parseFile fileName src of
     (Left err) -> error $ "Parser error: " ++ show err
-    (Right program) -> return $ runTypeChecker $ checkProgram (transpileProgram (File fileName src) program)
+    (Right program) -> return $ runTypeChecker $ transpileAndCheck (File fileName src) program
 
 test = checkFile "HelloWorld.hm"
 

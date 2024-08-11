@@ -7,7 +7,7 @@
 {-# OPTIONS_GHC -Wno-unrecognised-pragmas #-}
 {-# LANGUAGE LambdaCase #-}
 
-module Types (unify', genQName, genQName', constructorFieldTypes, paramTypes, skolemize, instantiate, pattern Tuple, eqType, getQuantifiedVars, unify, runUnificationResult, returnType, arity, UnificationError(..), UnificationResult, AbstractId, AbstractExpr (..), Type (..), AbstractFrac (..), AbstractAddress (..), CaptureEnv (..), (|+|), (|/|), (|*|), pattern CooperativeRefType, pattern CooperativeRef, pattern AbstractNum, pattern AbstractVar, tuple, tupleType, pattern Unit, string, number, pattern ListType, pattern RefType, pattern Ref, OverallUnificationResult, VarName(..), pattern FreshVarName) where
+module Types (substAliasType, genQNameRaw, rawTuple, toRaw, RawType(..), unify', genQName, genQName', constructorFieldTypes, paramTypes, skolemize, instantiate, pattern Tuple, eqType, getQuantifiedVars, unify, runUnificationResult, returnType, arity, UnificationError(..), UnificationResult, AbstractId, AbstractExpr (..), Type (..), AbstractFrac (..), AbstractAddress (..), CaptureEnv (..), (|+|), (|/|), (|*|), pattern CooperativeRefType, pattern CooperativeRef, pattern AbstractNum, pattern AbstractVar, tuple, tupleType, pattern Unit, string, number, pattern ListType, pattern RefType, pattern Ref, OverallUnificationResult, VarName(..), pattern FreshVarName, pattern TupleConstructor) where
 
 import Control.Monad (join, unless)
 import Control.Monad.Except (ExceptT, runExceptT, throwError)
@@ -215,6 +215,33 @@ inc (VarName s i) = VarName s (i + 1)
 instance Pretty VarName where
   pretty (VarName s i) = s ++ "[" ++ show i ++ "]"
 
+data RawType
+  = RawTyCon String
+  | RawTyVar VarName
+  | RawTyArrow CaptureEnv [RawType] RawType
+  | RawTyApp RawType [RawType]
+  | RawTyFrac AbstractFrac AbstractAddress RawType
+  | RawTySchema [VarName] RawType
+  | RawTyExists [VarName] RawType
+  deriving (Show, Eq)
+
+instance Pretty RawType where
+  pretty = show
+
+substAliasType :: [(VarName, Type)] -> Type -> Type
+substAliasType substs ty = applySubsts (substs, [], [], []) ty
+
+toRaw :: Type -> RawType
+toRaw (TyCon s) = RawTyCon s
+toRaw (TyVar v) = RawTyVar v
+toRaw (TyArrow env params retType) = RawTyArrow env (map toRaw params) (toRaw retType)
+toRaw (TyFrac frac addr ty) = RawTyFrac frac addr (toRaw ty)
+toRaw (TyApp ratorTy randTys) = RawTyApp (toRaw ratorTy) (map toRaw randTys)
+toRaw (TySchema qNames ty) = RawTySchema qNames (toRaw ty)
+toRaw (TyExists qNames ty) = RawTyExists qNames (toRaw ty)
+toRaw ty@(TyAlias {}) = error $ "Cannot convert aliased type: " ++ pretty ty ++ " to a raw type"
+-- data RawType = RawType Type
+
 data Type
   = TyCon String
   | TyArrow CaptureEnv [Type] Type
@@ -223,6 +250,7 @@ data Type
   | TyVar VarName
   | TySchema [VarName] Type
   | TyExists [VarName] Type
+  | TyAlias RawType Type
   deriving (Show, Eq)
 
 instance Pretty Type where
@@ -235,6 +263,7 @@ instance Pretty Type where
   pretty (TyApp (TyCon (TupleConstructor _)) args) = "(" ++ intercalate ", " (map pretty (args)) ++ ")"
   pretty (TyApp con args) = "(" ++ unwords (map pretty (con : args)) ++ ")"
   pretty (TyVar s) = "(var " ++ pretty s ++ ")"
+  pretty (TyAlias raw alias) = pretty alias ++ "(aliased as: " ++ pretty raw ++ ")"
   -- pretty (TyFrac (AbstractLiteral 1) address ty) = "Frac<" ++ pretty address ++ ", " ++ pretty frac ++ " * (" ++ pretty ty ++ ")>"
   pretty (Owned address ty) = "Owned<" ++ pretty address ++ ", " ++ pretty ty ++ ">"
   pretty (TyFrac frac address ty) = "Frac<" ++ pretty address ++ ", " ++ pretty frac ++ " * (" ++ pretty ty ++ ")>"
@@ -354,6 +383,9 @@ arity (TyFrac _ _ ty) = arity ty
 tuple :: [Type] -> Type
 tuple types = TyApp (tupleType (length types)) types
 
+rawTuple :: [RawType] -> RawType
+rawTuple types = RawTyApp (toRaw (tupleType (length types))) types
+
 type TySubstitution = (VarName, Type) -- [((String, Type), (String, AbstractFrac), (String, CaptureEnv), (String, AbstractAddress))]
 
 type FracSub = (VarName, AbstractFrac)
@@ -439,6 +471,7 @@ mapFst :: (a -> c) -> [(a, b)] -> [(c, b)]
 mapFst f xs = zip (map (f . fst) xs) (map snd xs)
 
 rename :: VarName -> VarName -> Type -> Type
+rename target replacement (TyAlias raw aliased) = TyAlias raw (rename target replacement aliased)
 rename target replacement (TyVar var) = TyVar (renameVarName target replacement var)
 rename target replacement (TyApp rator rands) = TyApp (rename target replacement rator) (map (rename target replacement) rands)
 rename target replacement (TyArrow env params r) = TyArrow (renameEnv target replacement env) (map (rename target replacement) params) (rename target replacement r)
@@ -459,6 +492,7 @@ applyTySubst (name, ty) _ | name `occurs` ty = error $ "Infinite type in subst: 
 applyTySubst (name, ty) (TyVar var)
   | name == var = ty
   | otherwise = TyVar var
+applyTySubst s (TyAlias raw aliased) = TyAlias raw (applyTySubst s aliased)
 applyTySubst s (TyApp rator rands) = TyApp (applyTySubst s rator) (map (applyTySubst s) rands)
 applyTySubst s (TyArrow env params r) = TyArrow env (map (applyTySubst s) params) (applyTySubst s r)
 applyTySubst s (TyFrac frac address ty) = TyFrac frac address (applyTySubst s ty)
@@ -702,7 +736,7 @@ getCallerLoc = prettyCallStack (popCallStack callStack)
 unify :: HasCallStack => Type -> Type -> OverallUnificationResult (Type, Substitution)
 unify t1Raw t2Raw = do
   -- traceM ("caller is: " ++ show getCallerLineNum ++ " uhhh " ++ pretty ty1)
-  -- traceM ("caller is: " ++ getCallerLoc ++ "\nunifying:" ++ pretty ty1)
+  -- traceM ("unifying:" ++ pretty ty1)
   -- traceM ("with: " ++ pretty ty2)
   unification <- liftUnificationResult ty1 ty2 (unifyTypes ty1 ty2)
   -- traceM ("applying subst: " ++ pretty unification)
@@ -778,6 +812,9 @@ skolemize (TyArrow env params r) = do
 skolemize (TyFrac frac addr ty) = do
   ty <- skolemize ty
   return $ TyFrac frac addr ty
+skolemize (TyAlias raw aliased) = do
+  aliased <- skolemize aliased
+  return (TyAlias raw aliased) 
 skolemize ty@(TyCon _) = return ty
 skolemize ty@(TyVar _) = return ty
 
@@ -839,6 +876,12 @@ freeIn s ty = s `elem` (getQuantifiedVars ty)
 notFreeIn :: VarName -> Type -> Bool
 notFreeIn s ty = not (freeIn s ty)
 
+freeInRaw :: VarName -> RawType -> Bool
+freeInRaw s ty = s `elem` (getQuantifiedVarsRaw ty)
+
+notFreeInRaw :: VarName -> RawType -> Bool
+notFreeInRaw s ty = not (freeInRaw s ty)
+
 genQName' :: String -> Type -> VarName
 genQName' s = genQName (FreshVarName s)
 
@@ -849,7 +892,24 @@ genQName name ty = loop name
     loop :: VarName -> VarName
     loop name = if (name `notFreeIn` ty) then name else loop (inc name)
 
+genQNameRaw :: VarName -> RawType -> VarName
+genQNameRaw name ty | name `notFreeInRaw` ty = name
+genQNameRaw name ty = loop name
+  where
+    loop :: VarName -> VarName
+    loop name = if (name `notFreeInRaw` ty) then name else loop (inc name)
+
 -- getQuantifiedVars :: Type -> [VarName]
+
+getQuantifiedVarsRaw :: RawType -> [VarName]
+getQuantifiedVarsRaw (RawTyVar s) = [s]
+getQuantifiedVarsRaw (RawTyCon _) = []
+getQuantifiedVarsRaw (RawTyApp rator rands) = getQuantifiedVarsRaw rator `union` (foldr (union . getQuantifiedVarsRaw) [] rands)
+getQuantifiedVarsRaw (RawTyArrow (CaptureEnvVar v) params r) = v : getQuantifiedVarsRaw r `union` (foldr (union . getQuantifiedVarsRaw) [] params)
+getQuantifiedVarsRaw (RawTyArrow _ params r) = getQuantifiedVarsRaw r `union` (foldr (union . getQuantifiedVarsRaw) [] params)
+getQuantifiedVarsRaw (RawTySchema qNames ty) = getQuantifiedVarsRaw ty \\ qNames
+getQuantifiedVarsRaw (RawTyExists qNames ty) = getQuantifiedVarsRaw ty \\ qNames
+getQuantifiedVarsRaw (RawTyFrac var addr ty) = (getQuantifiedVarsRaw ty) `union` (getQuantifiedVarsFrac var) `union` (getQuantifiedVarsAddress addr)
 
 getQuantifiedVars :: Type -> [VarName]
 getQuantifiedVars (TyVar s) = [s]

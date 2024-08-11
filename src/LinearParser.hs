@@ -3,6 +3,7 @@
 {-# OPTIONS_GHC -Wno-unused-do-bind #-}
 {-# LANGUAGE PatternSynonyms #-}
 {-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE TypeOperators #-}
 
 module LinearParser (ASTNode(..), PatternNode(..), ASTPos, LiteralOrName(..), Constructor, CaseBranch, ArgumentNode(..), parseAST, parseFile) where
 
@@ -12,11 +13,12 @@ import Data.Functor ((<&>))
 import Text.ParserCombinators.Parsec
 -- import Control.Monad.Cont (ap)
 -- import Debug.Trace (trace)
-import Types (Type(..), tuple, getQuantifiedVars, AbstractFrac, pattern AbstractVar, pattern AbstractNum, CaptureEnv (CaptureEnvVar), pattern Unit, genQName, AbstractAddress (..), VarName (..), pattern FreshVarName)
+import Types (RawType(..), Type(..), tuple, getQuantifiedVars, AbstractFrac, pattern AbstractVar, pattern AbstractNum, CaptureEnv (CaptureEnvVar), pattern Unit, genQName, AbstractAddress (..), VarName (..), pattern FreshVarName, RawType, toRaw, rawTuple, genQNameRaw)
 import Data.Char (isLower)
 import GHC.Unicode (isUpper)
 import Debug.Trace (trace)
 import Text.Parsec (parserTrace)
+import GHC.Generics (U1 (U1), (:*:) ((:*:)))
 
 -- data Type
 --   = TyVar String
@@ -58,7 +60,7 @@ data PatternNode
 data LiteralOrName = Name ASTPos String | StringLiteralNode ASTPos String | NumberLiteralNode ASTPos Float | UnitLiteral ASTPos
   deriving (Show, Eq)
 
-type Constructor = (String, [Type])
+type Constructor = (String, [RawType])
 
 type CaseBranch = (ASTPos, PatternNode, ASTNode)
 
@@ -82,8 +84,8 @@ let y = x + 6
 data ASTNode
   = LetPatternNode ASTPos PatternNode ASTNode ASTNode
   | -- | LetTuple ASTPos [String] LiteralOrName ASTNode
-    LetFunctionNode ASTPos String [(String, Type)] Type ASTNode ASTNode
-  | LetRecFunctionNode ASTPos String [(String, Type)] Type ASTNode ASTNode
+    LetFunctionNode ASTPos String [(String, RawType)] RawType ASTNode ASTNode
+  | LetRecFunctionNode ASTPos String [(String, RawType)] RawType ASTNode ASTNode
   -- | Function ASTPos [String] ASTNode
   | ApplicationNode ASTPos LiteralOrName [ArgumentNode]
   | Parenthesis ASTPos ASTNode
@@ -114,6 +116,7 @@ data ASTNode
   | RebalanceNode ASTPos [LiteralOrName]
   | AbstractNode ASTPos LiteralOrName
   | UnabstractNode ASTPos LiteralOrName
+  | TypeSynonymNode ASTPos String [String] RawType ASTNode
   -- | GetFracNode ASTPos LiteralOrName
   -- | AssertFracNode ASTPos LiteralOrName LiteralOrName
   deriving (Show)
@@ -154,6 +157,7 @@ getLoc (UnabstractNode loc _) = loc
 getLoc (RebalanceNode loc _) = loc
 getLoc (TupleIndexNode loc _ _) = loc
 getLoc (UnClosNode loc _) = loc
+getLoc (TypeSynonymNode loc _ _ _ _) = loc
 
 spaces1 :: Parser ()
 spaces1 = void (many1 space)
@@ -176,6 +180,7 @@ parseASTNodeNoSemicolon =
     -- <|> try parseAssertFrac
     -- <|> try parseGetFrac
     <|> try parseData
+    <|> try parseTypeSynonym
     -- <|> try parseFunction
     <|> try parseLetFunc
     <|> try parseLetPattern
@@ -488,7 +493,7 @@ let id (x : a) : a = x :in
 
 -- parseFuncBase constructor
 
-parseFuncType :: Parser ([Type], Type)
+parseFuncType :: Parser ([RawType], RawType)
 parseFuncType = do
   tys <- between (char '(') (char ')') (sepBy1 parseType (spaces >> string "->" >> spaces))
   let returnTy:argTys = reverse tys
@@ -713,12 +718,12 @@ parseTypeName = do
   rest <- many (letter <|> digit <|> symbol)
   return $ firstLetter : rest
 
-parseTypeLiteral :: Parser Type
+parseTypeLiteral :: Parser RawType
 parseTypeLiteral = do
   name <- parseTypeName
-  return $ if isUpper (head name) then TyCon name else TyVar (VarName name 0)
+  return $ if isUpper (head name) then RawTyCon name else RawTyVar (VarName name 0)
 
-parseParenType :: Parser Type
+parseParenType :: Parser RawType
 parseParenType = do
   char '('
   spaces
@@ -726,11 +731,11 @@ parseParenType = do
   spaces
   char ')'
   case length types of
-    0 -> return Unit
+    0 -> return (toRaw Unit)
     1 -> return $ head types
-    _ -> return $ tuple types
+    _ -> return $ rawTuple types
 
-parseTypeOperand :: Parser Type
+parseTypeOperand :: Parser RawType
 parseTypeOperand =
   parseParenType
     <|> parseFracType
@@ -780,7 +785,7 @@ parseUniqueAddressNamed = spaces1 >> parseVariableName <&> NamedUniqueAddress
 parseAddress :: Parser ParsedAddress
 parseAddress = try parseUniqueAddress <|> parseVarAddress
 
-parseFracType :: Parser Type
+parseFracType :: Parser RawType
 parseFracType = do
   char '<'
   spaces
@@ -797,11 +802,11 @@ parseFracType = do
   -- parserTrace (show ty)
   char '>'
   case addr of
-    (NamedUniqueAddress s) -> return $ TyExists [FreshVarName s] (TyFrac frac (VarAddress (FreshVarName s)) ty)
+    (NamedUniqueAddress s) -> return $ RawTyExists [FreshVarName s] (RawTyFrac frac (VarAddress (FreshVarName s)) ty)
     DefaultUniqueAddress -> 
-      let addrName = genQName (FreshVarName "addr") ty in
-        return $ TyExists [addrName] (TyFrac frac (VarAddress addrName) ty)
-    (ActualAddress addr) -> return $ TyFrac frac addr ty
+      let addrName = genQNameRaw (FreshVarName "addr") ty in
+        return $ RawTyExists [addrName] (RawTyFrac frac (VarAddress addrName) ty)
+    (ActualAddress addr) -> return $ RawTyFrac frac addr ty
 
 parseEnv :: Parser CaptureEnv
 parseEnv = do
@@ -810,7 +815,7 @@ parseEnv = do
   char ']'
   return (CaptureEnvVar (FreshVarName env))
 
-parseArrowType :: Parser Type
+parseArrowType :: Parser RawType
 parseArrowType = do
   env <- parseEnv
   spaces1
@@ -820,7 +825,7 @@ parseArrowType = do
   -- let quantifiedTypes = removeDups (args >>= getQuantifiedVars)
   -- trace ("qNames: " ++ show quantifiedTypes) (return ())
   -- let unQuantifiedArgs = map unQuantify args
-  return $ TyArrow env (init args) (last args)
+  return $ RawTyArrow env (init args) (last args)
   -- return (if null quantifiedTypes
   --     then TyArrow env (init args) (last args)
   --     else TySchema quantifiedTypes (TyArrow env (init args) (last args)))
@@ -836,25 +841,25 @@ removeDups :: Eq a => [a] -> [a]
 removeDups [] = []
 removeDups (x:xs) = if x `elem` xs then removeDups xs else x : removeDups xs
 
-parseTypeOperands :: Parser [Type]
+parseTypeOperands :: Parser [RawType]
 parseTypeOperands = spaces1 >> sepEndBy1 parseTypeOperand spaces1
 
-parseMaybeTypeApplication :: Parser Type
+parseMaybeTypeApplication :: Parser RawType
 parseMaybeTypeApplication = do
   constructor <- parseTypeLiteral
   -- trace (show operator) pure 5
   (try parseTypeOperands >>= \case
                                 [] -> return constructor
-                                params -> return $ TyApp constructor params) <|> return constructor
+                                params -> return $ RawTyApp constructor params) <|> return constructor
 
-parseConstructorField :: Parser Type
+parseConstructorField :: Parser RawType
 parseConstructorField =
   parseParenType
     <|> parseFracType
     <|> parseArrowType
     <|> parseTypeLiteral
 
-parseType :: Parser Type
+parseType :: Parser RawType
 parseType =
   parseParenType
     <|> parseFracType
@@ -876,6 +881,22 @@ parseData = do
   body <- parseASTNode
   end <- getPosition
   return $ DataNode (start, end) typeName quantifiedTypes constructors body
+
+parseTypeSynonym :: Parser ASTNode
+parseTypeSynonym = do
+  start <- getPosition
+  string ":type"
+  spaces1
+  typeName <- parseTypeName
+  spaces1
+  quantifiedTypes <- parseTypeName `endBy` spaces1
+  char '='
+  spaces1
+  ty <- parseType
+  parseLineEnd
+  body <- parseASTNode
+  end <- getPosition
+  return $ TypeSynonymNode (start, end) typeName quantifiedTypes ty body
 
 parseCaseBranch :: Parser CaseBranch
 parseCaseBranch = do

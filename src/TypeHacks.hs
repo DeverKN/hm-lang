@@ -35,6 +35,7 @@ import Prelude hiding (print)
 import GHC.Types (Symbol)
 import Data.Proxy (Proxy (..))
 import GHC.TypeLits (pattern SSymbol)
+import Data.List (intercalate)
 
 -- newtype Print a = Print {print :: a -> String}
 
@@ -321,3 +322,67 @@ instance Describe Describable where
   describe s = describe s
 
 test = map describe [Describable "a", Describable (1 :: Int), Describable True]
+
+class OverloadableFunc a b where
+  call :: a -> b
+
+instance OverloadableFunc (Int, Int) Int where
+  call = uncurry (+)
+
+instance OverloadableFunc (Int, Int) Bool where
+  call = uncurry (==)
+
+instance OverloadableFunc (Int, Bool) Int where
+  call = fst
+
+class OverloadableFunc2 a b c where
+  call2 :: a -> b -> c
+
+instance OverloadableFunc2 Int Int Int where
+  call2 = (+)
+
+instance OverloadableFunc2 Int Bool Int where
+  call2 = const
+
+instance OverloadableFunc2 Int Int Bool where
+  call2 = (==)
+
+-- result :: Int -> Bool
+-- -- result :: OverloadableFunc2 a Int c => a -> c
+-- result x = call (x, 1 :: Int)
+
+-- test' :: (Show a, Show b) => a -> b -> c
+-- test' = undefined
+
+-- test'' b = test' 1 b
+
+class C a where
+  find :: a
+
+newtype Stringify a = Stringify (a -> String)
+
+newtype Multiply a b c = Multiply (a -> b -> c)
+
+instance C (Stringify Int) where
+  find = Stringify show
+
+instance C (Multiply Int Int Int) where
+  find = Multiply (*)
+
+stringifyList :: Stringify a -> Stringify [a]
+stringifyList (Stringify f) = Stringify (intercalate ", " . map f)
+
+instance C (Stringify a) => C (Stringify [a]) where
+  -- find :: C (Stringify a) => Stringify [a]
+  find = stringifyList find
+
+stringify :: C (Stringify a) => a -> String
+stringify = let (Stringify f) = find in f
+
+times :: C (Multiply a b c) => a -> b -> c
+times = let (Multiply f) = find in f
+
+display :: C (Stringify a) => a -> IO ()
+display a = do
+  let s = stringify a
+  putStrLn s

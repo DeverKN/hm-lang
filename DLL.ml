@@ -4,15 +4,15 @@ type 'a thunk = Thunk of (unit -> 'a) * (('a option) ref)
 
 type 'a dllNode = First of ('a dllNode) ref
                 | Last of (('a dllNode) thunk) ref
-                | Node of (('a dllNode) thunk) ref * 'a * ('a dllNode) ref
+                | Node of ('a dllNode) ref * 'a * ('a dllNode) ref
 
 type 'a dllList = DLL of 'a dllNode * 'a dllNode
 
-let head = function
+(* let head = function
   | DLL (head, _) -> head
 
 let tail = function
-  | DLL (_, tail) -> tail
+  | DLL (_, tail) -> tail *)
 
 let force = function
   | Thunk (f, v) -> match !v with
@@ -26,7 +26,7 @@ let oops () = raise Partial
 
 let push x = function
   | DLL (_, ((Last prev) as last)) -> let oldPrev = force !prev in
-                            let newLast = Node (ref (defer oldPrev), x, ref last) in
+                            let newLast = Node ((ref oldPrev), x, ref last) in
                             prev := defer newLast;
                             (match oldPrev with
                             | First next | Node (_, _, next) -> next := newLast
@@ -35,17 +35,26 @@ let push x = function
 
 let unshift x = function
   | DLL ((First next) as first, _) -> let oldNext = !next in
-                                      let newFirst = Node (ref (defer first), x, ref !next) in
+                                      let newFirst = Node ((ref first), x, ref !next) in
                                       next := newFirst;
                                       (match oldNext with
-                                      | Last prev | Node (prev, _, _) -> prev := defer newFirst
+                                      | Last prev -> prev := defer newFirst
+                                      | Node (prev, _, _) -> prev := newFirst
                                       | First _ -> oops ())
   | DLL (_, _) -> oops ()
 
 
-let makeList _ =  let rec firstThunk = Thunk ((fun () -> First (ref last)), ref None)
-                      and last = Last (ref firstThunk) in
-                  DLL ((force firstThunk), last)
+let makeList _ =  let firstThunk = ref None in
+                  let last = ref None in
+                  firstThunk := (Some (laz (fun () -> 
+                                                let (Some last) = !last in
+                                                (First (ref (force last))))));
+                  last := (Some (laz (fun () -> 
+                                      let (Some firstThunk) = !firstThunk in
+                                      (Last (ref firstThunk)))));
+                  let (Some last) = !last in
+                  let (Some firstThunk) = !firstThunk in
+                  DLL ((force firstThunk), (force last))
 
 let rec string_of_dll_node string_of_x = function
   | First next -> "#START " ^ string_of_dll_node string_of_x !next

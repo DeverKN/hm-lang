@@ -1,7 +1,7 @@
 module LinearCEK (Simple (..), Pattern (..), Term (..), ASTLoc(..), HasLoc(..), Branch(..), File(..), printLoc, fancyPrintLoc) where
 
 import LinearParser (ASTPos)
-import Types (Type)
+import Types (Type, CaptureEnv, AbstractFrac, AbstractAddress, VarName, RawType)
 import Text.Parsec (sourceLine)
 import Text.Parsec.Pos (sourceColumn)
 
@@ -74,6 +74,7 @@ data Term
   | UnClos ASTLoc Simple
   | Abstract ASTLoc Simple
   | Unabstract ASTLoc Simple
+  -- | TypeSynonym ASTLoc String [String] Type Term
   -- | Alias ASTLoc Simple
   deriving (-- | Cast
             Show)
@@ -109,6 +110,7 @@ instance HasLoc Term where
   getLoc (UnClos pos _) = pos
   getLoc (Abstract pos _) = pos
   getLoc (Unabstract pos _) = pos
+  -- getLoc (TypeSynonym pos _ _ _ _) = pos
   -- getLoc (Alias pos _) = pos
 
 instance HasLoc Simple where

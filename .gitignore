@@ -1,2 +1,6 @@
 .stack-work/
 *~
+
+# Added by cargo
+
+rust/target
