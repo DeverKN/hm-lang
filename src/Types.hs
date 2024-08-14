@@ -7,7 +7,7 @@
 {-# OPTIONS_GHC -Wno-unrecognised-pragmas #-}
 {-# LANGUAGE LambdaCase #-}
 
-module Types (substAliasType, genQNameRaw, rawTuple, toRaw, RawType(..), unify', genQName, genQName', constructorFieldTypes, paramTypes, skolemize, instantiate, pattern Tuple, eqType, getQuantifiedVars, unify, runUnificationResult, returnType, arity, UnificationError(..), UnificationResult, AbstractId, AbstractExpr (..), Type (..), AbstractFrac (..), AbstractAddress (..), CaptureEnv (..), (|+|), (|/|), (|*|), pattern CooperativeRefType, pattern CooperativeRef, pattern AbstractNum, pattern AbstractVar, tuple, tupleType, pattern Unit, string, number, pattern ListType, pattern RefType, pattern Ref, OverallUnificationResult, VarName(..), pattern FreshVarName, pattern TupleConstructor) where
+module Types (substAliasType, genQNameRaw, genQNameRawList, rawTuple, toRaw, RawType(..), unify', genQName, genQName', constructorFieldTypes, paramTypes, skolemize, instantiate, pattern Tuple, eqType, getQuantifiedVars, unify, runUnificationResult, returnType, arity, UnificationError(..), UnificationResult, AbstractId, AbstractExpr (..), Type (..), AbstractFrac (..), AbstractAddress (..), CaptureEnv (..), (|+|), (|/|), (|*|), pattern CooperativeRefType, pattern CooperativeRef, pattern AbstractNum, pattern AbstractVar, tuple, tupleType, pattern Unit, string, number, pattern ListType, pattern RefType, pattern Ref, OverallUnificationResult, VarName(..), pattern FreshVarName, pattern TupleConstructor) where
 
 import Control.Monad (join, unless)
 import Control.Monad.Except (ExceptT, runExceptT, throwError)
@@ -263,7 +263,7 @@ instance Pretty Type where
   pretty (TyApp (TyCon (TupleConstructor _)) args) = "(" ++ intercalate ", " (map pretty (args)) ++ ")"
   pretty (TyApp con args) = "(" ++ unwords (map pretty (con : args)) ++ ")"
   pretty (TyVar s) = "(var " ++ pretty s ++ ")"
-  pretty (TyAlias raw alias) = pretty alias ++ "(aliased as: " ++ pretty raw ++ ")"
+  pretty (TyAlias raw alias) = "(" ++ pretty alias ++ "(aliased as: " ++ pretty raw ++ "))"
   -- pretty (TyFrac (AbstractLiteral 1) address ty) = "Frac<" ++ pretty address ++ ", " ++ pretty frac ++ " * (" ++ pretty ty ++ ")>"
   pretty (Owned address ty) = "Owned<" ++ pretty address ++ ", " ++ pretty ty ++ ">"
   pretty (TyFrac frac address ty) = "Frac<" ++ pretty address ++ ", " ++ pretty frac ++ " * (" ++ pretty ty ++ ")>"
@@ -434,6 +434,7 @@ occurs target (TyArrow env params r) = occurs target r || any (occurs target) pa
 occurs target (TyFrac frac addr ty) = occurs target ty || occursFrac target frac || occursAddr target addr
 occurs target (TySchema qNames ty) = target `notElem` qNames && occurs target ty
 occurs target (TyExists qNames ty) = target `notElem` qNames && occurs target ty
+occurs target (TyAlias _ ty) = occurs target ty
 occurs _ (TyCon _) = False
 
 occursEnv :: VarName -> CaptureEnv -> Bool
@@ -486,6 +487,8 @@ rename _ _ ty@(TyCon _) = ty
 
 removeElem :: (Eq a) => a -> [a] -> [a]
 removeElem a = filter (a /=)
+
+-- data UnificationError = ArityMismatch Int Int | InfiniteType TySubstitution
 
 applyTySubst :: TySubstitution -> Type -> Type
 applyTySubst (name, ty) _ | name `occurs` ty = error $ "Infinite type in subst: " ++ show (name, ty)
@@ -567,10 +570,6 @@ applyFracSubstHelper (name, replacement) (AbstractFrac fixed vars) =
     helper frac = (AbstractFrac Nothing [frac])
 
 applyFracSubst :: FracSub -> Type -> Type
--- applyAddrSubst (name, ty) _ | name `occurs` ty = error "Infinite type"
--- applyAddrSubst (name, ty) (TyVar var)
---   | name == var = ty
---   | otherwise = TyVar var
 applyFracSubst s (TyApp rator rands) = TyApp (applyFracSubst s rator) (map (applyFracSubst s) rands)
 applyFracSubst s (TyArrow env params r) = TyArrow env (map (applyFracSubst s) params) (applyFracSubst s r)
 applyFracSubst s (TyFrac frac addr ty) = (TyFrac (applyFracSubstHelper s frac) addr (applyFracSubst s ty))
@@ -702,6 +701,9 @@ unifyTypes ty1@(TyExists _ t1) ty2@(TyExists _ t2) = do
 -- unifyTypes (TySchema _ t1) (TyExists _ t2) = unifyTypes t1 t2
 unifyTypes (TySchema _ t1) t2 = unifyTypes t1 t2
 unifyTypes t1 (TySchema _ t2) = unifyTypes t1 t2
+unifyTypes (TyAlias _ t1) (TyAlias _ t2) = unifyTypes t1 t2
+unifyTypes t1 (TyAlias _ t2) = unifyTypes t1 t2
+unifyTypes (TyAlias _ t1) t2 = unifyTypes t1 t2
 unifyTypes ty1 ty2 = throwError (TypeMismatch ty1 ty2)
 
 -- mergeBindings :: Type -> Type -> Type
@@ -760,6 +762,23 @@ unify t1Raw t2Raw = do
             return (t1, t2)
         )
         []
+
+{--
+
+[VarName "addr" 0] in: 
+
+∀ a[1] env[1]. 
+  Owned<1, 
+    ((Owned<addr[0], (var a[1])>(aliased as: RawTyApp (RawTyCon "Owned") [RawTyVar (VarName "#unique" 0),RawTyVar (VarName "a" 0)]))(aliased as: RawTyApp (RawTyCon "UniqueOwned") [RawTyArrow (CaptureEnvVar (VarName "env" 0)) [RawTyApp (RawTyCon "Tuple:0") []] (RawTyVar (VarName "a" 0))])) -> ((Owned<addr[0], (var a[1])>(aliased as: RawTyApp (RawTyCon "Owned") [RawTyVar (VarName "#unique" 0),RawTyVar (VarName "a" 0)]))(aliased as: RawTyApp (RawTyCon "UniqueOwned") [RawTyApp (RawTyCon "Maybe") [RawTyVar (VarName "a" 0)]])) -> ∃ addr[0] a[1] env[1]. Owned<addr[0], (#Thunk (var env[1]) (var a[1]))>> 
+    
+unifying: 
+  ∀ env[0] a[0]. Owned<1, ((Owned<addr[0], (var a[0])>(aliased as: RawTyApp (RawTyCon "Owned") [RawTyVar (VarName "#unique" 0),RawTyVar (VarName "a" 0)]))(aliased as: RawTyApp (RawTyCon "UniqueOwned") [RawTyArrow (CaptureEnvVar (VarName "env" 0)) [RawTyApp (RawTyCon "Tuple:0") []] (RawTyVar (VarName "a" 0))])) -> ((Owned<addr[0], (var a[0])>(aliased as: RawTyApp (RawTyCon "Owned") [RawTyVar (VarName "#unique" 0),RawTyVar (VarName "a" 0)]))(aliased as: RawTyApp (RawTyCon "UniqueOwned") [RawTyApp (RawTyCon "Maybe") [RawTyVar (VarName "a" 0)]])) -> Owned<∃ addr[0], (#Thunk (var env[0]) (var a[0]))>> 
+and 
+  ∀ env[1] a[1]. Owned<1, ((Owned<addr[0], (var a[1])>(aliased as: RawTyApp (RawTyCon "Owned") [RawTyVar (VarName "#unique" 0),RawTyVar (VarName "a" 0)]))(aliased as: RawTyApp (RawTyCon "UniqueOwned") [RawTyArrow (CaptureEnvVar (VarName "env" 0)) [RawTyApp (RawTyCon "Tuple:0") []] (RawTyVar (VarName "a" 0))])) -> ((Owned<addr[0], (var a[1])>(aliased as: RawTyApp (RawTyCon "Owned") [RawTyVar (VarName "#unique" 0),RawTyVar (VarName "a" 0)]))(aliased as: RawTyApp (RawTyCon "UniqueOwned") [RawTyApp (RawTyCon "Maybe") [RawTyVar (VarName "a" 0)]])) -> Owned<∃ addr[1], (#Thunk (var env[1]) (var a[1]))>> 
+    
+with subst ([(VarName "a" 0,TyVar (VarName "a" 1)),(VarName "env" 0,TyVar (VarName "env" 1))],[],[],[(VarName "addr" 0,VarAddress (VarName "addr" 1))])
+
+--}
 
 genNameHelper ::  [VarName] -> VarName -> VarName
 genNameHelper names name = if name `notElem` names then name else genNameHelper names (inc name)
@@ -899,6 +918,10 @@ genQNameRaw name ty = loop name
     loop :: VarName -> VarName
     loop name = if (name `notFreeInRaw` ty) then name else loop (inc name)
 
+genQNameRawList :: VarName -> [RawType] -> VarName
+genQNameRawList name [] = name
+genQNameRawList name (ty:tys) = genQNameRawList (genQNameRaw name ty) tys
+
 -- getQuantifiedVars :: Type -> [VarName]
 
 getQuantifiedVarsRaw :: RawType -> [VarName]
@@ -919,6 +942,7 @@ getQuantifiedVars (TyArrow (CaptureEnvVar v) params r) = v : getQuantifiedVars r
 getQuantifiedVars (TyArrow _ params r) = getQuantifiedVars r `union` (foldr (union . getQuantifiedVars) [] params)
 getQuantifiedVars (TySchema qNames ty) = getQuantifiedVars ty \\ qNames
 getQuantifiedVars (TyExists qNames ty) = getQuantifiedVars ty \\ qNames
+getQuantifiedVars (TyAlias rawTy ty) = getQuantifiedVars ty
 getQuantifiedVars (TyFrac var addr ty) = (getQuantifiedVars ty) `union` (getQuantifiedVarsFrac var) `union` (getQuantifiedVarsAddress addr)
 
 occursEverFrac :: VarName -> AbstractFrac -> Bool
@@ -935,6 +959,7 @@ occursEver s (TyArrow (CaptureEnvVar v) params r) = s == v || any (occursEver s)
 occursEver s (TyArrow _ params r) = any (occursEver s) params || (occursEver s r)
 occursEver s (TySchema _ ty) = occursEver s ty
 occursEver s (TyExists _ ty) = occursEver s ty
+occursEver s (TyAlias _ ty) = occursEver s ty
 occursEver s (TyFrac frac addr ty) = (occursEverFrac s frac) || (occursEverAddr s addr) || (occursEver s ty)
 
 -- getQuantifiedVars (TyFrac _ (VarAddress v) ty) = v : (getQuantifiedVars ty)

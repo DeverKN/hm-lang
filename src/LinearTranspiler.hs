@@ -8,7 +8,7 @@ import LinearCEK (Pattern (..), Simple (..), Term (..), ASTLoc (..), Branch (Bra
 import LinearParser (ASTNode (..), ArgumentNode (..), CaseBranch, LiteralOrName (..), PatternNode (..), ASTPos)
 import Control.Monad.Reader (ReaderT (runReaderT), MonadReader (ask))
 import Control.Monad.Trans.Reader (runReader)
-import Types (Type (..), RawType (..), substAliasType, VarName, pattern TupleConstructor, pattern FreshVarName)
+import Types (Type (..), RawType (..), substAliasType, VarName, pattern TupleConstructor, pattern FreshVarName, genQName)
 import Pretty (Pretty(pretty))
 import Control.Monad.Error.Class (MonadError(throwError))
 import Control.Monad.Except (ExceptT)
@@ -324,7 +324,7 @@ transpile tyEnv (UnabstractNode pos lit) = do
 transpile tyEnv (TypeSynonymNode pos name qNames ty body) = do
   loc <- convertPos pos
   ty <- transpileType loc tyEnv ty
-  transpile ((name, AliasType (map FreshVarName qNames) ty):tyEnv) body-- do
+  transpile ((name, AliasType (map (flip genQName ty . FreshVarName) qNames) ty):tyEnv) body-- do
   -- pos <- convertPos loc
   -- body <- transpile tyEnv body
   -- return $ TypeSynonym pos name qNames ty body

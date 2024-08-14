@@ -2,8 +2,8 @@
 {-# OPTIONS_GHC -Wno-unrecognised-pragmas #-}
 {-# OPTIONS_GHC -Wno-unused-do-bind #-}
 {-# LANGUAGE PatternSynonyms #-}
-{-# LANGUAGE LambdaCase #-}
-{-# LANGUAGE TypeOperators #-}
+
+
 
 module LinearParser (ASTNode(..), PatternNode(..), ASTPos, LiteralOrName(..), Constructor, CaseBranch, ArgumentNode(..), parseAST, parseFile) where
 
@@ -13,12 +13,14 @@ import Data.Functor ((<&>))
 import Text.ParserCombinators.Parsec
 -- import Control.Monad.Cont (ap)
 -- import Debug.Trace (trace)
-import Types (RawType(..), Type(..), tuple, getQuantifiedVars, AbstractFrac, pattern AbstractVar, pattern AbstractNum, CaptureEnv (CaptureEnvVar), pattern Unit, genQName, AbstractAddress (..), VarName (..), pattern FreshVarName, RawType, toRaw, rawTuple, genQNameRaw)
-import Data.Char (isLower)
+import Types (RawType(..), AbstractFrac, pattern AbstractVar, pattern AbstractNum, CaptureEnv (CaptureEnvVar), pattern Unit, AbstractAddress (..), VarName (..), pattern FreshVarName, RawType, toRaw, rawTuple, genQNameRaw, genQNameRawList)
+-- import Data.Char (isLower)
 import GHC.Unicode (isUpper)
-import Debug.Trace (trace)
+import Debug.Trace (trace, traceShow)
 import Text.Parsec (parserTrace)
-import GHC.Generics (U1 (U1), (:*:) ((:*:)))
+import Data.Either (lefts, rights)
+import Data.Maybe (fromMaybe, fromJust)
+-- import GHC.Generics (U1 (U1), (:*:) ((:*:)))
 
 -- data Type
 --   = TyVar String
@@ -247,7 +249,7 @@ parseTuple = do
     else return $ TupleNode (start, end) vals
 
 symbol :: Parser Char
-symbol = oneOf "_+*/^#"
+symbol = oneOf "_+*/^"
 
 specialSymbols :: Parser Char
 specialSymbols = oneOf "-="
@@ -335,8 +337,7 @@ parseUnsignedFloat = do
 parseSignedFloat :: Parser Float
 parseSignedFloat = do
   char '-'
-  val <- parseUnsignedFloat
-  return (negate val)
+  negate <$> parseUnsignedFloat
 
 -- ap sign
 parseFloat :: Parser Float
@@ -363,15 +364,12 @@ parseLiteral :: Parser LiteralOrName
 parseLiteral = parseUnitLiteral <|> parseStringLiteral <|> parseNameLiteral <|> parseNumberLiteral
 
 parseSplitArgumentNode :: Parser ArgumentNode
-parseSplitArgumentNode = do
-  arg <- parseLiteral
-  return (SplitArg arg)
+parseSplitArgumentNode = SplitArg <$> parseLiteral
 
 parseMoveArgumentNode :: Parser ArgumentNode
 parseMoveArgumentNode = do
   char '@'
-  arg <- parseLiteral
-  return (MoveArg arg)
+  MoveArg <$> parseLiteral
 
 parseArgumentNode :: Parser ArgumentNode
 parseArgumentNode = parseMoveArgumentNode <|> parseSplitArgumentNode
@@ -735,12 +733,21 @@ parseParenType = do
     1 -> return $ head types
     _ -> return $ rawTuple types
 
-parseTypeOperand :: Parser RawType
-parseTypeOperand =
+
+data TypeOperand = Ty RawType | UnnamedUnique | NamedUnique String deriving (Show)
+
+parseTypeOperandTy :: Parser RawType
+parseTypeOperandTy =
   parseParenType
     <|> parseFracType
     <|> parseArrowType
     <|> parseTypeLiteral
+
+parseTypeOperandUnique :: Parser TypeOperand
+parseTypeOperandUnique = parseUnique <&> maybe UnnamedUnique NamedUnique
+
+parseTypeOperand :: Parser TypeOperand
+parseTypeOperand = try parseTypeOperandUnique <|> (parseTypeOperandTy <&> Ty)
 
 -- parseEnv :: 
 
@@ -759,7 +766,7 @@ parseFracVar = parseVariableName <&> AbstractVar . FreshVarName
 -- floatToRational x = toRational (trace (show x) x)
 
 parseFracLiteral :: Parser AbstractFrac
-parseFracLiteral = parseFloat <&> (AbstractNum . toRational)
+parseFracLiteral = parseFloat <&> AbstractNum . toRational
 
 parseFrac :: Parser AbstractFrac
 parseFrac = parseFracVar <|> parseFracLiteral
@@ -769,18 +776,26 @@ data ParsedAddress = DefaultUniqueAddress | NamedUniqueAddress String | ActualAd
 parseVarAddress :: Parser ParsedAddress
 parseVarAddress = parseVariableName <&> ActualAddress . VarAddress . FreshVarName
 
+parseUnique :: Parser (Maybe String)
+parseUnique = void (string "#unique") >> (try parseUniqueNamed <|> parseUniqueUnamed)
+
+-- parseUnique :: Parser ()
+-- parseUnique = void (string "#unique")
+
+parseUniqueUnamed :: Parser (Maybe String)
+parseUniqueUnamed = return Nothing
+
+parseUniqueNamed :: Parser (Maybe String)
+parseUniqueNamed = char '-' >> parseVariableName >>= \name -> if name == "addr" then error "Cannot use \"addr\" as the name for a named #unique" else return $ Just name
+
 parseUniqueAddress :: Parser ParsedAddress
-parseUniqueAddress = string "#unique" >> (try parseUniqueAddressNamed <|> parseUniqueAddressUnamed)
+parseUniqueAddress = parseUnique <&> maybe DefaultUniqueAddress NamedUniqueAddress
 
 -- defaultUniqueAddress :: String
 -- defaultUniqueAddress = "a" -- "__ssduapduoihtfas__:("
 -- defaultUniqueAddress = "__super_secret_default_unique_address_please_dont_use_or_ill_have_to_find_another_solution_:("
 
-parseUniqueAddressUnamed :: Parser ParsedAddress
-parseUniqueAddressUnamed = return DefaultUniqueAddress
 
-parseUniqueAddressNamed :: Parser ParsedAddress
-parseUniqueAddressNamed = spaces1 >> parseVariableName <&> NamedUniqueAddress
 
 parseAddress :: Parser ParsedAddress
 parseAddress = try parseUniqueAddress <|> parseVarAddress
@@ -802,8 +817,10 @@ parseFracType = do
   -- parserTrace (show ty)
   char '>'
   case addr of
-    (NamedUniqueAddress s) -> return $ RawTyExists [FreshVarName s] (RawTyFrac frac (VarAddress (FreshVarName s)) ty)
-    DefaultUniqueAddress -> 
+    (NamedUniqueAddress s) ->
+      let addrName = genQNameRaw (FreshVarName s) ty in
+        return $ RawTyExists [addrName] (RawTyFrac frac (VarAddress (FreshVarName s)) ty)
+    DefaultUniqueAddress ->
       let addrName = genQNameRaw (FreshVarName "addr") ty in
         return $ RawTyExists [addrName] (RawTyFrac frac (VarAddress addrName) ty)
     (ActualAddress addr) -> return $ RawTyFrac frac addr ty
@@ -841,16 +858,50 @@ removeDups :: Eq a => [a] -> [a]
 removeDups [] = []
 removeDups (x:xs) = if x `elem` xs then removeDups xs else x : removeDups xs
 
-parseTypeOperands :: Parser [RawType]
+parseTypeOperands :: Parser [TypeOperand]
 parseTypeOperands = spaces1 >> sepEndBy1 parseTypeOperand spaces1
+
+-- isUnique :: TypeOperand -> Bool
+-- isUnique (Ty _) = False
+-- isUnique Unique = True
+
+renameUnique :: String -> VarName -> Either String RawType -> Either String RawType
+renameUnique old new (Left s) | s == old = Right (RawTyVar new)
+renameUnique _ _ ty = ty
+
+maybeRight :: Either a b -> Maybe b
+maybeRight = either (const Nothing) Just
+
+allRight :: [Either a b] -> Maybe [b]
+allRight = mapM maybeRight
+
+getUniqueNames :: [TypeOperand] -> ([VarName], [RawType])
+getUniqueNames = phaseTwo . phaseOne
+  where phaseTwo :: ([String], [Either String RawType]) -> ([VarName], [RawType])
+        phaseTwo (uniqueNames, tys) =
+          let rawTys = rights tys
+              gennedUniqueNames = map (\name -> (name, genQNameRawList (FreshVarName name) rawTys)) uniqueNames in
+              let renamedTys = foldr (\(old, new) tys -> map (renameUnique old new) tys) tys gennedUniqueNames in
+                  (map snd gennedUniqueNames, fromJust (allRight renamedTys))
+        phaseOne :: [TypeOperand] -> ([String], [Either String RawType])
+        phaseOne = foldr (\op (names, tys) ->
+                          case op of
+                            Ty ty -> (names, Right ty:tys)
+                            UnnamedUnique -> ("addr":names, Left "addr":tys)
+                            NamedUnique name -> (name:names, Left name:tys)) ([], [])
+
+handleRawTyApp :: RawType -> [TypeOperand] -> RawType
+handleRawTyApp constructor [] = constructor
+handleRawTyApp constructor params =
+  case getUniqueNames params of
+    ([], tys) -> RawTyApp constructor tys
+    (names, tys) -> RawTyExists names (RawTyApp constructor tys)
 
 parseMaybeTypeApplication :: Parser RawType
 parseMaybeTypeApplication = do
   constructor <- parseTypeLiteral
   -- trace (show operator) pure 5
-  (try parseTypeOperands >>= \case
-                                [] -> return constructor
-                                params -> return $ RawTyApp constructor params) <|> return constructor
+  (try parseTypeOperands <&> handleRawTyApp constructor) <|> return constructor
 
 parseConstructorField :: Parser RawType
 parseConstructorField =
@@ -1017,4 +1068,4 @@ parseAST = do
   return ast
 
 parseFile :: String -> String -> Either ParseError ASTNode
-parseFile fileName file = parse parseAST fileName file
+parseFile = parse parseAST

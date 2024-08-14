@@ -4,7 +4,7 @@ import LinearTypeChecker (checkFile)
 import Types (CaptureEnv (..), Type (..), tuple, unify', pattern FreshVarName, VarName (VarName))
 
 main :: IO ()
-main = handleIOTests [{-- pure test, pure test2, pure test3, pure test4, pure test5, pure test8, plusTC, idTC, badIdTC, makeRefTC, listTC, --} dropListTC, tupleTC, untupleTC, dllTC]
+main = handleIOTests [{-- pure test, pure test2, pure test3, pure test4, pure test5, pure test8, plusTC, idTC, badIdTC, makeRefTC, listTC, --} dropListTC, tupleTC, untupleTC, dllTC, typeAliasTC, unboundTyVarTC]
 
 test :: TestResult
 test = assert "test" (words "the quick brown fox jumped over the lazy blue dog") ["the", "quick", "brown", "fox", "jumped", "over", "the", "lazy", "blue", "dog"]
@@ -90,6 +90,15 @@ dllTC = do
   ty <- checkFile "tests/DLL.hm"
   return $ assert "dll typecheck" ty "∀ a[0]. Owned<0, Frac<∃ addr[0], 1 % 2 * ((#DLL (var a[0])))> -> Owned<∃ addr[0], (#Ref (var a[0]))> -> Frac<∃ addr[0], 1 % 2 * ((#DLL (var a[0])))> -> Owned<∃ addr[0], (#DLL (var a[0]))>>"
 
+typeAliasTC :: IO TestResult
+typeAliasTC = do
+  ty <- checkFile "tests/TypeAlias.hm"
+  return $ assert "type alias typecheck" ty "Type checking succeded with type of: Owned<∃ addr[0], ()>"
+
+unboundTyVarTC :: IO TestResult
+unboundTyVarTC = do
+  ty <- checkFile "tests/UnboundTyVar.hm"
+  return $ assert "unbound tyvar typecheck" ty missing
 {--
 
 ∀ a env a0. Frac<1, 1 * ([] | ∃ addr. Frac<addr, 1 * ((<#con>List (var a0)))> -> ∃ addr0. Frac<addr0, 1 * (<#var-env>env | (var a0) -> Unit)> -> Unit)>

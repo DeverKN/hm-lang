@@ -19,7 +19,7 @@ import Pretty (Pretty (pretty))
 import System.IO (IOMode (ReadMode), hGetContents, openFile)
 import Types (AbstractAddress (..), AbstractFrac (..), CaptureEnv (..), Type (..), UnificationResult, arity, eqType, genQName, instantiate, number, paramTypes, returnType, tuple, unify, (|*|), (|+|), (|/|), pattern AbstractNum, pattern AbstractVar, pattern CooperativeRef, pattern CooperativeRefType, pattern Ref, pattern Tuple, pattern Unit, AbstractExpr (Var), constructorFieldTypes, getQuantifiedVars, OverallUnificationResult, UnificationError, pattern FreshVarName, VarName, genQName', RawType)
 import qualified Types as UnificationError(UnificationError(..))
-import Debug.Trace (traceM)
+import Debug.Trace (traceM, trace)
 import Data.Foldable (forM_)
 import Data.Either (fromLeft)
 import Control.Monad (void)
@@ -42,6 +42,7 @@ data TypeCheckerError
   | NotAFunction ASTLoc Type Simple
   | LinearVarReused ASTLoc String
   | LinearVarNotUsed ASTLoc String TypeCheckerEnv
+  -- | LinearVarNotUsed ASTLoc String TypeCheckerEnv
   | NonEmptyEnv ASTLoc TypeCheckerEnv
   | UnknownConstructor ASTLoc String
   | NotAConstructor ASTLoc String Type
@@ -116,7 +117,7 @@ forEachAndRestM_ f as = void $ forEachAndRestM f as
 convertCaseBodyMismatch :: [(ASTLoc, TypeCheckerEnv)] -> Either EnvMismatchResult ()
 -- convertCaseBodyMismatch [] = return ()
 convertCaseBodyMismatch = forEachAndRestM_ helper
-  where 
+  where
     helper :: (ASTLoc, TypeCheckerEnv) -> [(ASTLoc, TypeCheckerEnv)] -> Either EnvMismatchResult ()
     helper (firstLoc, (firstEnv, _)) rest = do
                                           let restLocs = map fst rest
@@ -166,6 +167,7 @@ instance Pretty TypeCheckerError where
   pretty (UnboundName loc name) = "Unbound variable: " ++ name ++ " used here:\n" ++ fancyPrintLoc loc
   pretty (InvalidDropType loc ty) = "Cannot drop variable of type: " ++ pretty ty ++ " here:\n" ++ fancyPrintLoc loc
   pretty (UnboundType loc ty) = "Unbound type name: " ++ pretty ty ++ " here:\n" ++ fancyPrintLoc loc
+  pretty (WrongTypeArity loc ty arity params) = "Type: " ++ pretty ty ++ " expects " ++ show arity ++ " args but was given: " ++ pretty params ++ " here:\n" ++ fancyPrintLoc loc
   -- pretty (UnificationErr loc ty1 ty2) = "Type mismatch, expected: " ++ pretty ty2 ++ " but got " ++ pretty ty1 ++ " at " ++ printLoc loc
   pretty x = show x
 
@@ -207,33 +209,33 @@ elimBindings loc bindings env = do
   -- trace ("eliminating: " ++ show bindings ++ " in: " ++ show env) (return ())
   foldM (\env (name, ty) -> elimBinding loc name ty env) env bindings
 
-elimBindingsOptional :: ASTLoc -> [(String, Type)] -> TypeCheckerEnv -> TypeCheckerResult TypeCheckerEnv
-elimBindingsOptional loc bindings env = do
-  -- trace ("eliminating: " ++ show bindings ++ " in: " ++ show env) (return ())
-  foldM (\env (name, ty) -> elimBindingOptional loc name ty env) env bindings
+-- elimBindingsOptional :: ASTLoc -> [(String, Type)] -> TypeCheckerEnv -> TypeCheckerResult TypeCheckerEnv
+-- elimBindingsOptional loc bindings env = do
+--   -- trace ("eliminating: " ++ show bindings ++ " in: " ++ show env) (return ())
+--   foldM (\env (name, ty) -> elimBindingOptional loc name ty env) env bindings
 
 partition :: (a -> Bool) -> [a] -> ([a], [a])
 partition test vals = (filter test vals, filter (not . test) vals)
 
-elimBindingOptional :: ASTLoc -> String -> Type -> TypeCheckerEnv -> TypeCheckerResult TypeCheckerEnv
-elimBindingOptional loc name _ ([], _) = do
-  -- trace ("eliminating: " ++ name ++ " in empty env") (return ())
-  throwError (LinearVarNotUsed loc name undefined)
-elimBindingOptional loc bindName bindType (env, skEnv) = do
-  -- trace ("eliminating: " ++ bindName) (return ())
-  let (matchingBindings, nonMatchingBindings) = partition (\(name, ty) -> bindName == name && bindType `eqType` ty) env
-  when (length matchingBindings > 2) (throwError (LinearVarReused loc bindName))
-  -- trace ("eliminated: " ++ bindName) (return ())
-  return (nonMatchingBindings, skEnv)
+-- elimBindingOptional :: ASTLoc -> String -> Type -> TypeCheckerEnv -> TypeCheckerResult TypeCheckerEnv
+-- elimBindingOptional loc name _ ([], _) = do
+--   -- trace ("eliminating: " ++ name ++ " in empty env") (return ())
+--   throwError (LinearVarNotUsed loc name undefined)
+-- elimBindingOptional loc bindName bindType (env, skEnv) = do
+--   -- trace ("eliminating: " ++ bindName) (return ())
+--   let (matchingBindings, nonMatchingBindings) = partition (\(name, ty) -> bindName == name && bindType `eqType` ty) env
+--   when (length matchingBindings > 2) (throwError (LinearVarReused loc bindName))
+--   -- trace ("eliminated: " ++ bindName) (return ())
+--   return (nonMatchingBindings, skEnv)
 
 elimBinding :: HasCallStack => ASTLoc -> String -> Type -> TypeCheckerEnv -> TypeCheckerResult TypeCheckerEnv
 elimBinding loc name _ ([], _) = do
   -- trace ("eliminating: " ++ name ++ " in empty env") (return ())
   throwError (LinearVarNotUsed loc name undefined)
-elimBinding loc bindName bindType (env, skEnv) = do
-  -- trace ("eliminating: " ++ bindName) (return ())
+elimBinding loc bindName bindType tyEnv@(env, skEnv) = do
+  -- traceM ("eliminating: " ++ bindName ++ " of type: " ++ pretty bindType)
   let (matchingBindings, nonMatchingBindings) = partition (\(name, ty) -> bindName == name && bindType `eqType` ty) env
-  when (null matchingBindings) (throwError (LinearVarNotUsed loc bindName undefined))
+  when (null matchingBindings) (throwError (LinearVarNotUsed loc bindName tyEnv))
   when (length matchingBindings > 2) (throwError (LinearVarReused loc bindName))
   -- trace ("eliminated: " ++ bindName) (return ())
   return (nonMatchingBindings, skEnv)
@@ -484,7 +486,7 @@ synthesize env (Application pos (Variable varPos (TupleConstructor n)) rands) = 
 synthesize env (Application pos rator rands) = do
   (ratorType, ratorEnv) <- synthesizeSimple env rator
   (randTypes, randsEnv) <- synthesizeRands ratorEnv rands
-  traceM (fancyPrintLoc pos)
+  -- traceM (fancyPrintLoc pos)
   -- traceM ("rator: " ++ show ratorType)
   -- traceM ("rands: " ++ show (functionFromArgs randTypes))
   (res, _) <- liftUnificationResult pos (unify ratorType (functionFromArgs randTypes))
@@ -688,11 +690,11 @@ synthesize env (DataTypeDeclaration pos tyName qNamesRaw constructors body) = do
           )
           constructors
   -- traceM (pretty constructorTypes)
-  traceM $ "typechecking datatype body for " ++ tyName
+  -- traceM $ "typechecking datatype body for " ++ tyName
   (ty, env) <- synthesize (extendEnv env constructorTypes) body
-  traceM $ "typechecked datatype body for " ++ tyName
+  -- traceM $ "typechecked datatype body for " ++ tyName
   -- trace ("b4" ++ show env) (return ())
-  env <- foldM (\env (name, ty) -> elimBindingOptional pos name ty env) env constructorTypes
+  env <- foldM (\env (name, ty) -> elimBinding pos name ty env) env constructorTypes
   -- trace ("after: " ++ show env) (return ())
   return (ty, env)
 synthesize env (Parallel pos branches) = do
@@ -941,7 +943,7 @@ transpileAndCheck :: File -> ASTNode -> TypeCheckerResult Type
 transpileAndCheck file program = case transpileProgram file program of
                           (Left err) -> throwError (convertTypeTranspilerError err)
                           (Right program) -> checkProgram program
-  
+
 
 checkFile :: String -> IO String
 checkFile fileName = do

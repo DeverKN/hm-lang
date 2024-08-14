@@ -1,5 +1,5 @@
 :data Maybe a = Nothing | Just a :in
-:type Unique addr a = <addr, 1 * a> :in
-:type UniqueOwned a = (Unique #unique a) :in
-:data Thunk env c = Thunk (UniqueOwned ([env] () -> c)) (UniqueOwned (Maybe c)) :in
+:type Owned addr a = <addr, 1 * a> :in
+:type UniqueOwned a = (Owned #unique a) :in
+:data Thunk env a = Thunk (UniqueOwned ([env] () -> a)) (UniqueOwned (Maybe a)) :in
 ()
