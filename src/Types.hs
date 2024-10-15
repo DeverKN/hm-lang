@@ -314,11 +314,11 @@ paramTypes (TyArrow _ paramTys _) = paramTys
 paramTypes ty@(TySchema qNames _) = error $ "Cannot get param types of quantified type: " ++ pretty ty
 paramTypes ty@(TyExists qNames _) = error $ "Cannot get param types of quantified type: " ++ pretty ty
 
-arity :: Type -> Int
-arity (TyArrow _ ps _) = length ps
-arity (TySchema _ ty) = arity ty
-arity (TyExists _ ty) = arity ty
-arity (TyFrac _ _ ty) = arity ty
+-- arity :: Type -> Int
+-- arity (TyArrow ps _) = length ps
+-- arity (TySchema _ ty) = arity ty
+-- arity (TyExists _ ty) = arity ty
+-- arity (TyFrac _ _ ty) = arity ty
 
 -- (==) (TyCon c1) (TyCon c2) = c1 == c2
 -- (==) (TyArrow captures1 args1 r1) (TyArrow captures2 args2 r2) = r1 == r2 && and (zipWith (==) args1 args2)
