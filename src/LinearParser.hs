@@ -114,7 +114,7 @@ data ASTNode
   | CaptureNode ASTPos LiteralOrName
   | TupleIndexNode ASTPos LiteralOrName LiteralOrName
   -- | TupleIndexMoveNode ASTPos LiteralOrName LiteralOrName
-  | UnClosNode ASTPos LiteralOrName --[LiteralOrName]
+  -- | UnClosNode ASTPos LiteralOrName --[LiteralOrName]
   | RebalanceNode ASTPos [LiteralOrName]
   | AbstractNode ASTPos LiteralOrName
   | UnabstractNode ASTPos LiteralOrName
@@ -158,7 +158,7 @@ getLoc (AbstractNode loc _) = loc
 getLoc (UnabstractNode loc _) = loc
 getLoc (RebalanceNode loc _) = loc
 getLoc (TupleIndexNode loc _ _) = loc
-getLoc (UnClosNode loc _) = loc
+-- getLoc (UnClosNode loc _) = loc
 getLoc (TypeSynonymNode loc _ _ _ _) = loc
 
 spaces1 :: Parser ()
@@ -175,7 +175,7 @@ parseASTNodeNoSemicolon =
     <|> try parseSetRef
     <|> try parseDeref
     <|> try parseRebalence
-    <|> try parseUnClos
+    -- <|> try parseUnClos
     <|> try parseAbstract
     <|> try parseUnabstract
     -- <|> try parseDerefMove
@@ -834,15 +834,21 @@ parseEnv = do
 
 parseArrowType :: Parser RawType
 parseArrowType = do
-  env <- parseEnv
+  -- env <- parseEnv
   spaces1
   -- string "->"
   -- args <- parseTypeOperands
-  args <- sepBy1 parseType (spaces >> string "->" >> spaces)
+  -- args <- between (char '(') (char ')') (sepBy1 parseType spaces)
+  arg <- parseType
+  spaces
+  string "->"
+  spaces
+  rType <- parseType
+  -- args <- sepBy1 parseType (spaces >> string "->" >> spaces)
   -- let quantifiedTypes = removeDups (args >>= getQuantifiedVars)
   -- trace ("qNames: " ++ show quantifiedTypes) (return ())
   -- let unQuantifiedArgs = map unQuantify args
-  return $ RawTyArrow env (init args) (last args)
+  return $ RawTyArrow arg rType
   -- return (if null quantifiedTypes
   --     then TyArrow env (init args) (last args)
   --     else TySchema quantifiedTypes (TyArrow env (init args) (last args)))
@@ -1036,21 +1042,21 @@ parseTupleIndex = do
 --   end <- getPosition
 --   return $ AssertFracNode (start, end) ref frac
 
-parseUnClos :: Parser ASTNode
-parseUnClos = do
-  start <- getPosition
-  string ":unclos"
-  spaces1
-  clos <- parseLiteral
-  -- spaces
-  -- string "->"
-  -- spaces
-  -- char '['
-  -- vals <- sepBy parseLiteral spaces1
-  -- spaces
-  -- char ']'
-  end <- getPosition
-  return $ UnClosNode (start, end) clos
+-- parseUnClos :: Parser ASTNode
+-- parseUnClos = do
+--   start <- getPosition
+--   string ":unclos"
+--   spaces1
+--   clos <- parseLiteral
+--   -- spaces
+--   -- string "->"
+--   -- spaces
+--   -- char '['
+--   -- vals <- sepBy parseLiteral spaces1
+--   -- spaces
+--   -- char ']'
+--   end <- getPosition
+--   return $ UnClosNode (start, end) clos
 
 parseRebalence :: Parser ASTNode
 parseRebalence = do

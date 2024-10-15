@@ -1,7 +1,7 @@
 module LinearCEK (Simple (..), Pattern (..), Term (..), ASTLoc(..), HasLoc(..), Branch(..), File(..), printLoc, fancyPrintLoc) where
 
 import LinearParser (ASTPos)
-import Types (Type, CaptureEnv, AbstractFrac, AbstractAddress, VarName, RawType)
+import Types (Type)
 import Text.Parsec (sourceLine)
 import Text.Parsec.Pos (sourceColumn)
 
@@ -18,10 +18,10 @@ data File = File {fileName :: String, body :: String} deriving (Show)
 data ASTLoc = ASTLoc ASTPos File deriving (Show)
 
 printLoc :: ASTLoc -> String
-printLoc (ASTLoc (start, end) (File fileName body)) = "(" ++ show start ++ ":" ++ show end ++ ")"
+printLoc (ASTLoc (start, end) (File _ _)) = "(" ++ show start ++ ":" ++ show end ++ ")"
 
 fancyPrintLoc :: ASTLoc -> String
-fancyPrintLoc (ASTLoc pos (File fileName body)) = fancyPrintPos body pos
+fancyPrintLoc (ASTLoc pos (File _ body)) = fancyPrintPos body pos
 
 -- formatPos :: ASTPos -> String
 -- formatPos (start, end) = " (" ++ show start ++ ":" ++ show end ++ ") "
@@ -71,7 +71,7 @@ data Term
   | Semicolon ASTLoc Term Term
   | DataTypeDeclaration ASTLoc String [String] [Constructor] Term
   | Rebalance ASTLoc [Simple]
-  | UnClos ASTLoc Simple
+  -- | UnClos ASTLoc Simple
   | Abstract ASTLoc Simple
   | Unabstract ASTLoc Simple
   -- | TypeSynonym ASTLoc String [String] Type Term
@@ -107,7 +107,7 @@ instance HasLoc Term where
   getLoc (Semicolon pos _ _) = pos
   getLoc (DataTypeDeclaration pos _ _ _ _) = pos
   getLoc (Rebalance pos _) = pos
-  getLoc (UnClos pos _) = pos
+  -- getLoc (UnClos pos _) = pos
   getLoc (Abstract pos _) = pos
   getLoc (Unabstract pos _) = pos
   -- getLoc (TypeSynonym pos _ _ _ _) = pos

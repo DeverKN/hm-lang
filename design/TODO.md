@@ -98,3 +98,55 @@ cell2 can't be dropped because it contains a value that can't be dropped, since 
 ```
 
 ## Improve unification algorithm
+
+## Value Types
+Represents types that can be trivially copied:
+- Number
+- ex: 5 is always a value type
+- String
+- ex: "test" is always a value type
+- Tuple where all fields are value types
+- ex: (5, "test") is always a value type
+- Arrow Types
+- ex: A -> B is always a value type (even if A and B aren't)
+- ADTs where all fields are value types
+```hs
+data MaybeString = Just String | Nothing :in
+  ...
+-- MaybeString is always a value type
+```
+- Generic ADT where all fields are value types and all generic parametes are value types
+```hs
+data Maybe a = Just a | Nothing :in
+  ...
+-- Maybe is only a value type when a is
+-- ex: Maybe String is a value type but Maybe <a, 1 * Ref b> is not
+```
+Not Value Types:
+- References
+- Anything that contains references
+Value Types are copiable:
+- ex:
+```hs
+let (a, b) = :copy 5
+-- works fine
+let (a, b) = :copy (ref 5)
+-- this is an error
+```
+This is exposed in the type system as a kind of implicit typeclass that is automatically derivied if possible,
+and cannot have manual instances created
+
+this would also allow for non-fractional tuples and ADTs ex:
+```hs
+(a, b) :: (Value a, Value b) => a -> b -> (a, b)
+(a, b) :: a -> b -> <UniqueRef, 1 * (a, b)>
+
+Left a :: (Value a) => a -> Either a b
+Right a :: (Value b) => b -> Either a b
+
+Left a :: a -> <UniqueRef, 1 * Either a b>
+Right a :: b -> <UniqueRef, 1 * Either a b>
+```
+note: this would require overloading which could be accomplished using multiple callable instance,
+however this would also require a way to disambiguate between multiple matching instances
+simple heuristic: use the most specific instance possible

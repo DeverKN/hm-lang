@@ -7,20 +7,15 @@
 {-# OPTIONS_GHC -Wno-unrecognised-pragmas #-}
 {-# LANGUAGE LambdaCase #-}
 
-module Types (substAliasType, genQNameRaw, genQNameRawList, rawTuple, toRaw, RawType(..), unify', genQName, genQName', constructorFieldTypes, paramTypes, skolemize, instantiate, pattern Tuple, eqType, getQuantifiedVars, unify, runUnificationResult, returnType, arity, UnificationError(..), UnificationResult, AbstractId, AbstractExpr (..), Type (..), AbstractFrac (..), AbstractAddress (..), CaptureEnv (..), (|+|), (|/|), (|*|), pattern CooperativeRefType, pattern CooperativeRef, pattern AbstractNum, pattern AbstractVar, tuple, tupleType, pattern Unit, string, number, pattern ListType, pattern RefType, pattern Ref, OverallUnificationResult, VarName(..), pattern FreshVarName, pattern TupleConstructor) where
+module Types (arity, substAliasType, genQNameRaw, genQNameRawList, rawTuple, toRaw, RawType(..), unify', genQName, genQName', constructorFieldTypes, paramTypes, skolemize, instantiate, pattern Tuple, eqType, getQuantifiedVars, unify, runUnificationResult, returnType, UnificationError(..), UnificationResult, AbstractId, AbstractExpr (..), Type (..), AbstractFrac (..), AbstractAddress (..), CaptureEnv (..), (|+|), (|/|), (|*|), pattern CooperativeRefType, pattern CooperativeRef, pattern AbstractNum, pattern AbstractVar, tuple, tupleType, pattern Unit, string, number, pattern ListType, pattern RefType, pattern Ref, OverallUnificationResult, VarName(..), pattern FreshVarName, pattern TupleConstructor, pattern Closure, pattern ClosureOnce) where
 
 import Control.Monad (join, unless)
 import Control.Monad.Except (ExceptT, runExceptT, throwError)
-import Control.Monad.State (MonadState (get, put), State, evalState, StateT (runStateT))
+import Control.Monad.State (MonadState (get, put), State, evalState)
 import Data.Either (isRight)
-import Data.Functor ((<&>))
 import Data.List (intercalate, intersect, sort, union, (\\))
-import Debug.Trace (trace, traceM)
 import GHC.Stack (HasCallStack, callStack, popCallStack, prettyCallStack)
 import Pretty (Pretty (..))
-import Control.Monad.Trans.State (runState)
-import GHC.Stack.Types (SrcLoc)
-import GHC.Stack.Types (getCallStack)
 
 -- import Types (Tuple)
 
@@ -218,7 +213,7 @@ instance Pretty VarName where
 data RawType
   = RawTyCon String
   | RawTyVar VarName
-  | RawTyArrow CaptureEnv [RawType] RawType
+  | RawTyArrow RawType RawType
   | RawTyApp RawType [RawType]
   | RawTyFrac AbstractFrac AbstractAddress RawType
   | RawTySchema [VarName] RawType
@@ -229,12 +224,12 @@ instance Pretty RawType where
   pretty = show
 
 substAliasType :: [(VarName, Type)] -> Type -> Type
-substAliasType substs ty = applySubsts (substs, [], [], []) ty
+substAliasType substs ty = applySubsts (substs, [], []) ty
 
 toRaw :: Type -> RawType
 toRaw (TyCon s) = RawTyCon s
 toRaw (TyVar v) = RawTyVar v
-toRaw (TyArrow env params retType) = RawTyArrow env (map toRaw params) (toRaw retType)
+toRaw (TyArrow param retType) = RawTyArrow (toRaw param) (toRaw retType)
 toRaw (TyFrac frac addr ty) = RawTyFrac frac addr (toRaw ty)
 toRaw (TyApp ratorTy randTys) = RawTyApp (toRaw ratorTy) (map toRaw randTys)
 toRaw (TySchema qNames ty) = RawTySchema qNames (toRaw ty)
@@ -244,7 +239,7 @@ toRaw ty@(TyAlias {}) = error $ "Cannot convert aliased type: " ++ pretty ty ++ 
 
 data Type
   = TyCon String
-  | TyArrow CaptureEnv [Type] Type
+  | TyArrow Type Type
   | TyApp Type [Type]
   | TyFrac AbstractFrac AbstractAddress Type
   | TyVar VarName
@@ -257,8 +252,8 @@ instance Pretty Type where
   pretty :: Type -> String
   pretty Unit = "()"
   pretty (TyCon s) = "#" ++ s
-  pretty (TyArrow (CaptureEnv []) args ret) = intercalate " -> " (map pretty args) ++ " -> " ++ pretty ret
-  pretty (TyArrow captures args ret) = pretty captures ++ " | " ++ intercalate " -> " (map pretty args) ++ " -> " ++ pretty ret
+  -- pretty (TyArrow (CaptureEnv []) args ret) = intercalate " -> " (map pretty args) ++ " -> " ++ pretty ret
+  pretty (TyArrow param ret) = pretty param ++ " -> " ++ pretty ret
   pretty (TyApp con []) = "(" ++ pretty con ++ " #empty" ++ ")"
   pretty (TyApp (TyCon (TupleConstructor _)) args) = "(" ++ intercalate ", " (map pretty (args)) ++ ")"
   pretty (TyApp con args) = "(" ++ unwords (map pretty (con : args)) ++ ")"
@@ -272,6 +267,13 @@ instance Pretty Type where
   pretty (TyExists [qAddr] (TyFrac frac (VarAddress addr) ty)) | qAddr == addr = "Frac<∃ " ++ pretty addr ++ ", " ++ pretty frac ++ " * (" ++ pretty ty ++ ")>"
   pretty (TyExists qNames ty) = "∃ " ++ unwords (map pretty qNames) ++ ". " ++ pretty ty
 
+-- argTypes 
+pattern Closure :: Type -> Type -> Type -> Type
+pattern Closure env argType rType = TyApp (TyCon "Closure") [env, argType, rType]
+
+pattern ClosureOnce :: Type -> Type -> Type -> Type
+pattern ClosureOnce env argType rType = TyApp (TyCon "ClosureOnce") [env, argType, rType]
+
 eqType :: HasCallStack => Type -> Type -> Bool
 eqType ty1 ty2 = unificationSuccess (unify ty1 ty2)
 
@@ -280,7 +282,7 @@ eqType ty1 ty2 = unificationSuccess (unify ty1 ty2)
 
 returnType :: Type -> Type
 returnType (TyFrac _ _ ty) = returnType ty
-returnType (TyArrow _ _ ty) = ty
+returnType (TyArrow _ ty) = ty
 returnType (TySchema qNames ty) =
   let remainingQNames = qNames `intersect` getQuantifiedVars (returnType ty)
    in if null remainingQNames then returnType ty else TySchema remainingQNames (returnType ty)
@@ -290,7 +292,7 @@ returnType (TyExists qNames ty) =
 
 constructorFieldTypes :: Type -> [Type]
 constructorFieldTypes (TyFrac _ _ ty) = constructorFieldTypes ty
-constructorFieldTypes (TyArrow _ paramTys _) = paramTys
+constructorFieldTypes (TyArrow paramTy rTy) = paramTy : constructorFieldTypes rTy
 constructorFieldTypes (TySchema qNames innerTy) = do
   ty <- constructorFieldTypes innerTy
   let newQNames = qNames `intersect` getQuantifiedVars ty
@@ -310,15 +312,15 @@ constructorFieldTypes (TyExists qNames innerTy) = do
 
 paramTypes :: Type -> [Type]
 paramTypes (TyFrac _ _ ty) = paramTypes ty
-paramTypes (TyArrow _ paramTys _) = paramTys
+paramTypes (TyArrow paramTy _) = [paramTy]
 paramTypes ty@(TySchema qNames _) = error $ "Cannot get param types of quantified type: " ++ pretty ty
 paramTypes ty@(TyExists qNames _) = error $ "Cannot get param types of quantified type: " ++ pretty ty
 
--- arity :: Type -> Int
--- arity (TyArrow ps _) = length ps
--- arity (TySchema _ ty) = arity ty
--- arity (TyExists _ ty) = arity ty
--- arity (TyFrac _ _ ty) = arity ty
+arity :: Type -> Int
+arity (TyArrow _ ty) = 1 + arity ty
+arity (TySchema _ ty) = arity ty
+arity (TyExists _ ty) = arity ty
+arity (TyFrac _ _ ty) = arity ty
 
 -- (==) (TyCon c1) (TyCon c2) = c1 == c2
 -- (==) (TyArrow captures1 args1 r1) (TyArrow captures2 args2 r2) = r1 == r2 && and (zipWith (==) args1 args2)
@@ -381,6 +383,7 @@ paramTypes ty@(TyExists qNames _) = error $ "Cannot get param types of quantifie
 -- -- sameType _ _ = False
 
 tuple :: [Type] -> Type
+tuple [ty] = ty
 tuple types = TyApp (tupleType (length types)) types
 
 rawTuple :: [RawType] -> RawType
@@ -390,11 +393,11 @@ type TySubstitution = (VarName, Type) -- [((String, Type), (String, AbstractFrac
 
 type FracSub = (VarName, AbstractFrac)
 
-type EnvSub = (VarName, CaptureEnv)
+-- type EnvSub = (VarName, CaptureEnv)
 
 type AddressSub = (VarName, AbstractAddress)
 
-type Substitution = ([TySubstitution], [FracSub], [EnvSub], [AddressSub])
+type Substitution = ([TySubstitution], [FracSub], [AddressSub])
 
 type SkolemizationResult a = State [VarName] a
 
@@ -430,7 +433,7 @@ type SkolemizationResult a = State [VarName] a
 occurs :: VarName -> Type -> Bool
 occurs target (TyVar var) = var == target
 occurs target (TyApp rator rands) = occurs target rator || any (occurs target) rands
-occurs target (TyArrow env params r) = occurs target r || any (occurs target) params || occursEnv target env
+occurs target (TyArrow param r) = occurs target r || occurs target param
 occurs target (TyFrac frac addr ty) = occurs target ty || occursFrac target frac || occursAddr target addr
 occurs target (TySchema qNames ty) = target `notElem` qNames && occurs target ty
 occurs target (TyExists qNames ty) = target `notElem` qNames && occurs target ty
@@ -475,7 +478,7 @@ rename :: VarName -> VarName -> Type -> Type
 rename target replacement (TyAlias raw aliased) = TyAlias raw (rename target replacement aliased)
 rename target replacement (TyVar var) = TyVar (renameVarName target replacement var)
 rename target replacement (TyApp rator rands) = TyApp (rename target replacement rator) (map (rename target replacement) rands)
-rename target replacement (TyArrow env params r) = TyArrow (renameEnv target replacement env) (map (rename target replacement) params) (rename target replacement r)
+rename target replacement (TyArrow param r) = TyArrow (rename target replacement param) (rename target replacement r)
 rename target replacement (TyFrac frac addr ty) = TyFrac (renameFrac target replacement frac) (renameAddr target replacement addr) (rename target replacement ty)
 rename target replacement (TySchema qNames ty)
   | target `notElem` qNames = TySchema qNames (rename target replacement ty)
@@ -497,7 +500,7 @@ applyTySubst (name, ty) (TyVar var)
   | otherwise = TyVar var
 applyTySubst s (TyAlias raw aliased) = TyAlias raw (applyTySubst s aliased)
 applyTySubst s (TyApp rator rands) = TyApp (applyTySubst s rator) (map (applyTySubst s) rands)
-applyTySubst s (TyArrow env params r) = TyArrow env (map (applyTySubst s) params) (applyTySubst s r)
+applyTySubst s (TyArrow param r) = TyArrow (applyTySubst s param) (applyTySubst s r)
 applyTySubst s (TyFrac frac address ty) = TyFrac frac address (applyTySubst s ty)
 -- applyTySubst s@(substName, (TyVar newName)) (TySchema qNames ty) | substName `elem` qNames = TySchema (newName : (removeElem substName qNames)) (applyTySubst s ty)
 applyTySubst (substName, _) ty@(TySchema _ _) | not $ substName `occursEver` ty = ty -- trace (substName ++ " does not occur in: " ++ pretty innerTy) ty
@@ -531,7 +534,7 @@ applyAddrSubst :: AddressSub -> Type -> Type
 --   | name == var = ty
 --   | otherwise = TyVar var
 applyAddrSubst s (TyApp rator rands) = TyApp (applyAddrSubst s rator) (map (applyAddrSubst s) rands)
-applyAddrSubst s (TyArrow env params r) = TyArrow env (map (applyAddrSubst s) params) (applyAddrSubst s r)
+applyAddrSubst s (TyArrow param r) = TyArrow (applyAddrSubst s param) (applyAddrSubst s r)
 applyAddrSubst s@(target, replacement) (TyFrac frac (VarAddress addr) ty) | addr == target = (TyFrac frac replacement (applyAddrSubst s ty))
 applyAddrSubst s@(substName, VarAddress newName) (TySchema qNames ty) | substName `elem` qNames = TySchema (newName : (removeElem substName qNames)) (applyAddrSubst s ty)
 applyAddrSubst s@(substName, _) (TySchema qNames ty) =
@@ -544,19 +547,19 @@ applyAddrSubst s@(substName, _) (TySchema qNames ty) =
 -- \| otherwise = TySchema qNames ty
 applyAddrSubst _ ty = ty
 
-applyEnvSubst :: EnvSub -> Type -> Type
-applyEnvSubst s (TyApp rator rands) = TyApp (applyEnvSubst s rator) (map (applyEnvSubst s) rands)
-applyEnvSubst s@(target, replacement) (TyArrow (CaptureEnvVar env) params r) | env == target = TyArrow replacement (map (applyEnvSubst s) params) (applyEnvSubst s r)
-applyEnvSubst s (TyArrow env params r) = TyArrow env (map (applyEnvSubst s) params) (applyEnvSubst s r)
-applyEnvSubst s (TyFrac frac address ty) = TyFrac frac address (applyEnvSubst s ty)
-applyEnvSubst s@(substName, CaptureEnvVar newName) (TySchema qNames ty) | substName `elem` qNames = TySchema (newName : (removeElem substName qNames)) (applyEnvSubst s ty)
-applyEnvSubst s@(substName, _) (TySchema qNames ty) =
-  let newQnames = removeElem substName qNames
-   in if null newQnames
-        then applyEnvSubst s ty
-        else TySchema newQnames (applyEnvSubst s ty)
-applyEnvSubst s (TyExists qNames ty) = TyExists qNames (applyEnvSubst s ty)
-applyEnvSubst _ ty = ty
+-- applyEnvSubst :: EnvSub -> Type -> Type
+-- applyEnvSubst s (TyApp rator rands) = TyApp (applyEnvSubst s rator) (map (applyEnvSubst s) rands)
+-- -- applyEnvSubst s@(target, replacement) (TyArrow params r) | env == target = TyArrow replacement (map (applyEnvSubst s) params) (applyEnvSubst s r)
+-- applyEnvSubst s (TyArrow params r) = TyArrow env (map (applyEnvSubst s) params) (applyEnvSubst s r)
+-- applyEnvSubst s (TyFrac frac address ty) = TyFrac frac address (applyEnvSubst s ty)
+-- applyEnvSubst s@(substName, CaptureEnvVar newName) (TySchema qNames ty) | substName `elem` qNames = TySchema (newName : (removeElem substName qNames)) (applyEnvSubst s ty)
+-- applyEnvSubst s@(substName, _) (TySchema qNames ty) =
+--   let newQnames = removeElem substName qNames
+--    in if null newQnames
+--         then applyEnvSubst s ty
+--         else TySchema newQnames (applyEnvSubst s ty)
+-- applyEnvSubst s (TyExists qNames ty) = TyExists qNames (applyEnvSubst s ty)
+-- applyEnvSubst _ ty = ty
 
 mergeFracs :: [AbstractFrac] -> AbstractFrac
 mergeFracs = foldr (|+|) (AbstractNum 0)
@@ -571,7 +574,7 @@ applyFracSubstHelper (name, replacement) (AbstractFrac fixed vars) =
 
 applyFracSubst :: FracSub -> Type -> Type
 applyFracSubst s (TyApp rator rands) = TyApp (applyFracSubst s rator) (map (applyFracSubst s) rands)
-applyFracSubst s (TyArrow env params r) = TyArrow env (map (applyFracSubst s) params) (applyFracSubst s r)
+applyFracSubst s (TyArrow param r) = TyArrow (applyFracSubst s param) (applyFracSubst s r)
 applyFracSubst s (TyFrac frac addr ty) = (TyFrac (applyFracSubstHelper s frac) addr (applyFracSubst s ty))
 applyFracSubst s@(substName, frac) (TySchema qNames ty) | substName `elem` qNames = TySchema ((getQuantifiedVarsFrac frac) ++ (removeElem substName qNames)) (applyFracSubst s ty)
 applyFracSubst s@(substName, _) (TySchema qNames ty) =
@@ -585,8 +588,8 @@ applyFracSubst s@(substName, _) (TySchema qNames ty) =
 applyFracSubst _ ty = ty
 
 applySubsts :: Substitution -> Type -> Type
-applySubsts (tySubsts, fracSubsts, envSubsts, addrSubsts) ty = 
-  foldr applyTySubst (foldr applyFracSubst (foldr applyEnvSubst (foldr applyAddrSubst ty (reverse addrSubsts)) (reverse envSubsts)) (reverse fracSubsts)) (reverse tySubsts)
+applySubsts (tySubsts, fracSubsts, addrSubsts) ty = 
+  foldr applyTySubst (foldr applyFracSubst (foldr applyAddrSubst ty (reverse addrSubsts)) (reverse fracSubsts)) (reverse tySubsts)
 
 data UnificationError = TypeMismatch Type Type
                         | Circularity
@@ -606,19 +609,19 @@ type UnificationResult a = ExceptT UnificationError (State Int) a
 -- renameQNames :: [String] -> Type -> UnificationResult [Type]
 
 emptySubst :: Substitution
-emptySubst = ([], [], [], [])
+emptySubst = ([], [], [])
 
 tySubst :: [TySubstitution] -> Substitution
-tySubst s = (s, [], [], [])
+tySubst s = (s, [], [])
 
 fracSubst :: [FracSub] -> Substitution
-fracSubst s = ([], s, [], [])
+fracSubst s = ([], s, [])
 
-envSubst :: [EnvSub] -> Substitution
-envSubst s = ([], [], s, [])
+-- envSubst :: [EnvSub] -> Substitution
+-- envSubst s = ([], [], s, [])
 
 addrSubst :: [AddressSub] -> Substitution
-addrSubst s = ([], [], [], s)
+addrSubst s = ([], [], s)
 
 unifyList :: [Type] -> [Type] -> UnificationResult Substitution
 unifyList [] [] = return emptySubst
@@ -646,14 +649,14 @@ unifyAddr addr1@(InstantiatedAddress a1) addr2@(InstantiatedAddress a2)
   | otherwise = throwError (AddressMismatch addr1 addr2)
 unifyAddr addr1 addr2 = throwError (AddressMismatch addr1 addr2)
 
-unifyEnv :: CaptureEnv -> CaptureEnv -> UnificationResult Substitution
-unifyEnv (CaptureEnv captures1) (CaptureEnv captures2) = unifyList captures1 captures2
-unifyEnv env1@(InstantiatedCaptureEnvVar v1) env2@(InstantiatedCaptureEnvVar v2)
-  | v1 == v2 = return emptySubst
-  | otherwise = throwError (EnvMismatch env1 env2)
-unifyEnv (CaptureEnvVar v1) (CaptureEnvVar v2) | v1 == v2 = return emptySubst
-unifyEnv (CaptureEnvVar v1) env = return $ envSubst [(v1, env)]
-unifyEnv env (CaptureEnvVar v1) = return $ envSubst [(v1, env)]
+-- unifyEnv :: CaptureEnv -> CaptureEnv -> UnificationResult Substitution
+-- unifyEnv (CaptureEnv captures1) (CaptureEnv captures2) = unifyList captures1 captures2
+-- unifyEnv env1@(InstantiatedCaptureEnvVar v1) env2@(InstantiatedCaptureEnvVar v2)
+--   | v1 == v2 = return emptySubst
+--   | otherwise = throwError (EnvMismatch env1 env2)
+-- unifyEnv (CaptureEnvVar v1) (CaptureEnvVar v2) | v1 == v2 = return emptySubst
+-- unifyEnv (CaptureEnvVar v1) env = return $ envSubst [(v1, env)]
+-- unifyEnv env (CaptureEnvVar v1) = return $ envSubst [(v1, env)]
 
 unifyFrac :: AbstractFrac -> AbstractFrac -> UnificationResult Substitution
 unifyFrac frac1 frac2 | frac1 == frac2 = return $ fracSubst []
@@ -662,7 +665,7 @@ unifyFrac frac (AbstractFrac Nothing [([name], 1)]) = return $ fracSubst [(name,
 unifyFrac frac1 frac2 = throwError (FracMismatch frac1 frac2)
 
 mergeSubst :: Substitution -> Substitution -> Substitution
-mergeSubst (a1, b1, c1, d1) (a2, b2, c2, d2) = (a1 ++ a2, b1 ++ b2, c1 ++ c2, d1 ++ d2)
+mergeSubst (a1, b1, c1) (a2, b2, c2) = (a1 ++ a2, b1 ++ b2, c1 ++ c2)
 
 -- pattern QualifiedType
 
@@ -670,12 +673,12 @@ unifyTypes :: Type -> Type -> UnificationResult Substitution
 unifyTypes t1@(TyCon c1) t2@(TyCon c2)
   | c1 == c2 = return emptySubst
   | otherwise = throwError (TypeMismatch t1 t2)
-unifyTypes ty1@(TyArrow env1 params1 r1) ty2@(TyArrow env2 params2 r2) = do
-  unless (length params1 == length params2) (throwError $ TypeMismatch ty1 ty2)
-  envSubst <- unifyEnv env1 env2
-  substs1 <- unifyList params1 params2
+unifyTypes ty1@(TyArrow param1 r1) ty2@(TyArrow param2 r2) = do
+  -- unless (length params1 == length params2) (throwError $ TypeMismatch ty1 ty2)
+  -- envSubst <- unifyEnv env1 env2
+  substs1 <- unifyTypes param1 param2
   substs2 <- unifyTypes (applySubsts substs1 r1) (applySubsts substs1 r2)
-  return $ envSubst `mergeSubst` substs1 `mergeSubst` substs2
+  return $ substs1 `mergeSubst` substs2
 unifyTypes ty1@(TyApp rator1 rands1) ty2@(TyApp rator2 rands2) = do
   -- trace (show rator1 ++ " other " ++ show rator2) (return ())
   -- trace (show rands1 ++ " other " ++ show rands2) (return ())
@@ -824,10 +827,10 @@ skolemize (TyApp rator rands) = do
   rator <- skolemize rator
   rands <- mapM skolemize rands
   return $ TyApp rator rands
-skolemize (TyArrow env params r) = do
+skolemize (TyArrow param r) = do
   r <- skolemize r
-  params <- mapM skolemize params
-  return $ TyArrow env params r
+  params <- skolemize param
+  return $ TyArrow param r
 skolemize (TyFrac frac addr ty) = do
   ty <- skolemize ty
   return $ TyFrac frac addr ty
@@ -852,11 +855,11 @@ instantiate (TyApp rator rands) = do
   rator <- instantiate rator
   rands <- mapM instantiate rands
   return $ TyApp rator rands
-instantiate (TyArrow env params r) = do
+instantiate (TyArrow param r) = do
   r <- instantiate r
-  env <- instantiateEnv env
-  params <- mapM instantiate params
-  return $ TyArrow env params r
+  -- env <- instantiateEnv env
+  param <- instantiate param
+  return $ TyArrow param r
 instantiate (TyFrac frac addr ty) = do
   -- frac <- skolemizeFrac frac
   ty <- instantiate ty
@@ -864,9 +867,9 @@ instantiate (TyFrac frac addr ty) = do
 instantiate ty@(TyCon _) = return ty
 instantiate ty@(TyVar n) = return $ TyCon (pretty n)
 
-instantiateEnv :: CaptureEnv -> SkolemizationResult CaptureEnv
-instantiateEnv (CaptureEnvVar v) = return $ InstantiatedCaptureEnvVar v
-instantiateEnv (CaptureEnv v) = return $ CaptureEnv v
+-- instantiateEnv :: CaptureEnv -> SkolemizationResult CaptureEnv
+-- instantiateEnv (CaptureEnvVar v) = return $ InstantiatedCaptureEnvVar v
+-- instantiateEnv (CaptureEnv v) = return $ CaptureEnv v
 
 runUnificationResult :: OverallUnificationResult a -> a
 runUnificationResult = \case
@@ -928,8 +931,8 @@ getQuantifiedVarsRaw :: RawType -> [VarName]
 getQuantifiedVarsRaw (RawTyVar s) = [s]
 getQuantifiedVarsRaw (RawTyCon _) = []
 getQuantifiedVarsRaw (RawTyApp rator rands) = getQuantifiedVarsRaw rator `union` (foldr (union . getQuantifiedVarsRaw) [] rands)
-getQuantifiedVarsRaw (RawTyArrow (CaptureEnvVar v) params r) = v : getQuantifiedVarsRaw r `union` (foldr (union . getQuantifiedVarsRaw) [] params)
-getQuantifiedVarsRaw (RawTyArrow _ params r) = getQuantifiedVarsRaw r `union` (foldr (union . getQuantifiedVarsRaw) [] params)
+-- getQuantifiedVarsRaw (RawTyArrow params r) = v : getQuantifiedVarsRaw r `union` (foldr (union . getQuantifiedVarsRaw) [] params)
+getQuantifiedVarsRaw (RawTyArrow param r) = getQuantifiedVarsRaw r `union` (getQuantifiedVarsRaw param)
 getQuantifiedVarsRaw (RawTySchema qNames ty) = getQuantifiedVarsRaw ty \\ qNames
 getQuantifiedVarsRaw (RawTyExists qNames ty) = getQuantifiedVarsRaw ty \\ qNames
 getQuantifiedVarsRaw (RawTyFrac var addr ty) = (getQuantifiedVarsRaw ty) `union` (getQuantifiedVarsFrac var) `union` (getQuantifiedVarsAddress addr)
@@ -938,8 +941,8 @@ getQuantifiedVars :: Type -> [VarName]
 getQuantifiedVars (TyVar s) = [s]
 getQuantifiedVars (TyCon _) = []
 getQuantifiedVars (TyApp rator rands) = getQuantifiedVars rator `union` (foldr (union . getQuantifiedVars) [] rands)
-getQuantifiedVars (TyArrow (CaptureEnvVar v) params r) = v : getQuantifiedVars r `union` (foldr (union . getQuantifiedVars) [] params)
-getQuantifiedVars (TyArrow _ params r) = getQuantifiedVars r `union` (foldr (union . getQuantifiedVars) [] params)
+-- getQuantifiedVars (TyArrow params r) = v : getQuantifiedVars r `union` (foldr (union . getQuantifiedVars) [] params)
+getQuantifiedVars (TyArrow param r) = getQuantifiedVars r `union` getQuantifiedVars param
 getQuantifiedVars (TySchema qNames ty) = getQuantifiedVars ty \\ qNames
 getQuantifiedVars (TyExists qNames ty) = getQuantifiedVars ty \\ qNames
 getQuantifiedVars (TyAlias rawTy ty) = getQuantifiedVars ty
@@ -955,8 +958,8 @@ occursEver :: VarName -> Type -> Bool
 occursEver s (TyVar s1) = s == s1
 occursEver _ (TyCon _) = False
 occursEver s (TyApp rator rands) = any (occursEver s) rands || (occursEver s rator)
-occursEver s (TyArrow (CaptureEnvVar v) params r) = s == v || any (occursEver s) params || (occursEver s r)
-occursEver s (TyArrow _ params r) = any (occursEver s) params || (occursEver s r)
+-- occursEver s (TyArrow params r) = s == v || any (occursEver s) params || (occursEver s r)
+occursEver s (TyArrow param r) = occursEver s param || (occursEver s r)
 occursEver s (TySchema _ ty) = occursEver s ty
 occursEver s (TyExists _ ty) = occursEver s ty
 occursEver s (TyAlias _ ty) = occursEver s ty

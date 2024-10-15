@@ -5,25 +5,25 @@
 
 module LinearTypeChecker where
 
-import Control.Monad (foldM, replicateM, unless, when)
+import Control.Monad (foldM, replicateM, unless, void, when)
 import Control.Monad.Except (MonadError (throwError), runExceptT)
 import Control.Monad.RWS (MonadState (..))
 import Control.Monad.State (StateT (runStateT), evalState, evalStateT)
 import Control.Monad.State.Lazy (runState)
+import Data.Either (fromLeft)
+import Data.Foldable (forM_)
 import Data.Functor ((<&>))
-import Data.List (delete, deleteBy, union, intercalate)
-import LinearCEK (Pattern (..), Simple (..), Term (..), ASTLoc (ASTLoc), HasLoc (getLoc), Branch (Branch), File (..), printLoc, fancyPrintLoc)
-import LinearParser (parseFile, ASTNode)
-import LinearTranspiler (transpileProgram, TypeTranspilerError (WrongArity, UnknownType))
+import Data.List (delete, deleteBy, intercalate, union)
+import Debug.Trace (trace, traceM)
+import GHC.Stack (HasCallStack)
+import LinearCEK (ASTLoc (ASTLoc), Branch (Branch), File (..), HasLoc (getLoc), Pattern (..), Simple (..), Term (..), fancyPrintLoc, printLoc)
+import LinearParser (ASTNode, parseFile)
+import LinearTranspiler (TypeTranspilerError (UnknownType, WrongArity), transpileProgram)
 import Pretty (Pretty (pretty))
 import System.IO (IOMode (ReadMode), hGetContents, openFile)
-import Types (AbstractAddress (..), AbstractFrac (..), CaptureEnv (..), Type (..), UnificationResult, arity, eqType, genQName, instantiate, number, paramTypes, returnType, tuple, unify, (|*|), (|+|), (|/|), pattern AbstractNum, pattern AbstractVar, pattern CooperativeRef, pattern CooperativeRefType, pattern Ref, pattern Tuple, pattern Unit, AbstractExpr (Var), constructorFieldTypes, getQuantifiedVars, OverallUnificationResult, UnificationError, pattern FreshVarName, VarName, genQName', RawType)
-import qualified Types as UnificationError(UnificationError(..))
-import Debug.Trace (traceM, trace)
-import Data.Foldable (forM_)
-import Data.Either (fromLeft)
-import Control.Monad (void)
-import GHC.Stack (HasCallStack)
+import Types (AbstractAddress (..), AbstractExpr (Var), AbstractFrac (..), CaptureEnv (..), OverallUnificationResult, RawType, Type (..), UnificationError, UnificationResult, VarName (VarName), arity, constructorFieldTypes, eqType, genQName, genQName', getQuantifiedVars, instantiate, number, paramTypes, returnType, tuple, unify, (|*|), (|+|), (|/|), pattern AbstractNum, pattern AbstractVar, pattern Closure, pattern CooperativeRef, pattern CooperativeRefType, pattern FreshVarName, pattern Ref, pattern Tuple, pattern Unit, ClosureOnce)
+import qualified Types as UnificationError (UnificationError (..))
+
 -- import LinearTypeChecker (TupleConstructor)
 
 -- import Test.HUnit
@@ -42,15 +42,15 @@ data TypeCheckerError
   | NotAFunction ASTLoc Type Simple
   | LinearVarReused ASTLoc String
   | LinearVarNotUsed ASTLoc String TypeCheckerEnv
-  -- | LinearVarNotUsed ASTLoc String TypeCheckerEnv
-  | NonEmptyEnv ASTLoc TypeCheckerEnv
+  | -- | LinearVarNotUsed ASTLoc String TypeCheckerEnv
+    NonEmptyEnv ASTLoc TypeCheckerEnv
   | UnknownConstructor ASTLoc String
   | NotAConstructor ASTLoc String Type
   | CaseConstructorMismatch ASTLoc Type Type
   | CaseBodyTypeMismatch ASTLoc Term [Type]
-  -- | CaseBodyUsageMismatch ASTLoc String
-  -- | CaseBodyEnvTypeMismatch ASTLoc String
-  | CaseBodyEnvMismatch ASTLoc Term EnvMismatchResult--[(ASTLoc, TypeCheckerEnv)]
+  | -- | CaseBodyUsageMismatch ASTLoc String
+    -- | CaseBodyEnvTypeMismatch ASTLoc String
+    CaseBodyEnvMismatch ASTLoc Term EnvMismatchResult -- [(ASTLoc, TypeCheckerEnv)]
   | EmptyCase ASTLoc Term
   | InvalidDrop ASTLoc Simple AbstractFrac
   | SetPartialRef ASTLoc Simple AbstractFrac
@@ -76,11 +76,12 @@ convertTypeTranspilerError (UnknownType loc ty) = UnboundType loc ty
 
 hideBaseBindings :: TypeCheckerEnv -> TypeCheckerEnv
 hideBaseBindings env = case evalStateT (elimBindings undefined baseTypeBindings env) 0 of
-                          Right env -> env
+  Right env -> env
 
-data EnvMismatchResult = MismatchedUse String ASTLoc ASTLoc
-                        | MismatchedType String (ASTLoc, Type) (ASTLoc, Type) UnificationError
-                        deriving (Show)
+data EnvMismatchResult
+  = MismatchedUse String ASTLoc ASTLoc
+  | MismatchedType String (ASTLoc, Type) (ASTLoc, Type) UnificationError
+  deriving (Show)
 
 convertCaseBodyMismatchHelper2 :: ASTLoc -> (String, Type) -> ASTLoc -> [(String, Type)] -> Either EnvMismatchResult ()
 convertCaseBodyMismatchHelper2 firstBranchLoc (varName, varTy) otherBranchLoc otherBranchEnv =
@@ -90,28 +91,29 @@ convertCaseBodyMismatchHelper2 firstBranchLoc (varName, varTy) otherBranchLoc ot
       case varTy `unify` otherTy of
         (Left (_, _, err)) -> Left (MismatchedType varName (firstBranchLoc, varTy) (otherBranchLoc, otherTy) err)
         (Right _) -> pure ()
-        -- pure () 
-        -- Left (MismatchedType varName (firstBranchLoc, varTy) (otherBranchLoc, otherTy))
+
+-- pure ()
+-- Left (MismatchedType varName (firstBranchLoc, varTy) (otherBranchLoc, otherTy))
 
 convertCaseBodyMismatchHelper :: ASTLoc -> [(String, Type)] -> ASTLoc -> [(String, Type)] -> Either EnvMismatchResult ()
 convertCaseBodyMismatchHelper firstBranchLoc firstBranchEnv otherBranchLoc otherBranchEnv = forM_ firstBranchEnv (\var -> convertCaseBodyMismatchHelper2 firstBranchLoc var otherBranchLoc otherBranchEnv)
 
 forEachAndRest :: (a -> [a] -> b) -> [a] -> [b]
 forEachAndRest f as = helper as []
-                    where
-                      helper [] _ = []
-                      helper [first] previous = [f first previous]
-                      helper (first:rest) previous = f first (previous ++ rest):helper rest (first:previous)
+  where
+    helper [] _ = []
+    helper [first] previous = [f first previous]
+    helper (first : rest) previous = f first (previous ++ rest) : helper rest (first : previous)
 
 -- listMtoMList :: Monad m => [m a] -> m [a]
 -- listMtoMList ms = do
 --   x <- ms
 --   x
 
-forEachAndRestM :: Monad m => (a -> [a] -> m b) -> [a] -> m [b]
+forEachAndRestM :: (Monad m) => (a -> [a] -> m b) -> [a] -> m [b]
 forEachAndRestM f as = sequence $ forEachAndRest f as
 
-forEachAndRestM_ :: Monad f => (a -> [a] -> f b) -> [a] -> f ()
+forEachAndRestM_ :: (Monad f) => (a -> [a] -> f b) -> [a] -> f ()
 forEachAndRestM_ f as = void $ forEachAndRestM f as
 
 convertCaseBodyMismatch :: [(ASTLoc, TypeCheckerEnv)] -> Either EnvMismatchResult ()
@@ -120,10 +122,10 @@ convertCaseBodyMismatch = forEachAndRestM_ helper
   where
     helper :: (ASTLoc, TypeCheckerEnv) -> [(ASTLoc, TypeCheckerEnv)] -> Either EnvMismatchResult ()
     helper (firstLoc, (firstEnv, _)) rest = do
-                                          let restLocs = map fst rest
-                                          let restEnvs = map (getVarTyEnv . snd) rest
-                                          forM_ (zip restLocs restEnvs) (uncurry (convertCaseBodyMismatchHelper firstLoc firstEnv))
-                                          convertCaseBodyMismatch rest
+      let restLocs = map fst rest
+      let restEnvs = map (getVarTyEnv . snd) rest
+      forM_ (zip restLocs restEnvs) (uncurry (convertCaseBodyMismatchHelper firstLoc firstEnv))
+      convertCaseBodyMismatch rest
 
 -- [
 --   [
@@ -141,15 +143,16 @@ convertCaseBodyMismatch = forEachAndRestM_ helper
 
 makeCaseBodyMismatchMsg :: [(ASTLoc, TypeCheckerEnv)] -> String
 makeCaseBodyMismatchMsg bodies = case fromLeft (error $ "case body mismatch has no errors for bodies: " ++ pretty (map (getVarTyEnv . snd) bodies)) (convertCaseBodyMismatch bodies) of
-                                    MismatchedUse varName usedBranch unusedBranch -> varName ++ " was used in this branch:\n" ++ fancyPrintLoc usedBranch ++ "\nbut not this branch:\n" ++ fancyPrintLoc unusedBranch
-                                    MismatchedType varName (branch1, ty1) (branch2, ty2) err -> varName ++ " has type " ++ pretty ty1 ++ " in this branch:\n" ++ fancyPrintLoc branch1 ++ "\nBut type " ++ pretty ty2 ++ " in this branch:\n" ++ fancyPrintLoc branch2 ++ "These aren't the same because:\n" ++ pretty err
-                                    -- catch -> undefined
-                                     --case (convertCaseBodyMismatch bodies) of
+  MismatchedUse varName usedBranch unusedBranch -> varName ++ " was used in this branch:\n" ++ fancyPrintLoc usedBranch ++ "\nbut not this branch:\n" ++ fancyPrintLoc unusedBranch
+  MismatchedType varName (branch1, ty1) (branch2, ty2) err -> varName ++ " has type " ++ pretty ty1 ++ " in this branch:\n" ++ fancyPrintLoc branch1 ++ "\nBut type " ++ pretty ty2 ++ " in this branch:\n" ++ fancyPrintLoc branch2 ++ "These aren't the same because:\n" ++ pretty err
 
-                                  -- Left (MismatchedUse consumedVarName consumedBranch, notConsumedBranch) ->
+-- catch -> undefined
+-- case (convertCaseBodyMismatch bodies) of
 
-                                  -- Left (MismatchedType consumedVarName (branch1, ty1), (branch2, ty2)) ->
-                                  -- Left (MismatchedType { consumedVarName, consumedBranch, notConsumedBranch})
+-- Left (MismatchedUse consumedVarName consumedBranch, notConsumedBranch) ->
+
+-- Left (MismatchedType consumedVarName (branch1, ty1), (branch2, ty2)) ->
+-- Left (MismatchedType { consumedVarName, consumedBranch, notConsumedBranch})
 
 instance Pretty EnvMismatchResult where
   pretty (MismatchedUse varName usedBranch unusedBranch) = varName ++ " was used in this branch:\n" ++ fancyPrintLoc usedBranch ++ "\nbut not this branch:\n" ++ fancyPrintLoc unusedBranch
@@ -160,7 +163,7 @@ instance Pretty TypeCheckerError where
   pretty (TypeMismatch loc ty1 ty2) = "Type mismatch, expected: " ++ pretty ty1 ++ " but got " ++ pretty ty2 ++ " Here: \n" ++ fancyPrintLoc loc
   pretty (UnificationError loc ty1 ty2 innerTy1 innerTy2) = "Type mismatch, expected: " ++ pretty ty1 ++ " but got " ++ pretty ty2 ++ ". Couldn't unify " ++ pretty innerTy1 ++ " with " ++ pretty innerTy2 ++ " Here:\n" ++ fancyPrintLoc loc
   pretty (CaseBodyTypeMismatch loc term types) = "Case body types don't match got: " ++ pretty types ++ " Here: \n" ++ fancyPrintLoc loc
-  pretty (CaseBodyEnvMismatch loc term err) = pretty err --"Case body environments don't match got: " ++ intercalate "\n" (map (pretty . fst . hideBaseBindings) envs) ++ " at " ++ fancyPrintLoc loc
+  pretty (CaseBodyEnvMismatch loc term err) = pretty err -- "Case body environments don't match got: " ++ intercalate "\n" (map (pretty . fst . hideBaseBindings) envs) ++ " at " ++ fancyPrintLoc loc
   pretty (InvalidAbstract loc ty) = "Cannot abstract: " ++ pretty ty ++ " since it's not a fractional type. Error here: \n" ++ fancyPrintLoc loc
   pretty (LinearVarNotUsed loc varName env) = "Variable " ++ varName ++ " was not used. Env is: " ++ pretty env ++ ". Issue occurs here:\n" ++ fancyPrintLoc loc
   pretty (NonEmptyEnv loc env) = "Final environment isn't empty, the following variables are unused: " ++ pretty env ++ ". Problem occurs here:\n" ++ fancyPrintLoc loc
@@ -228,7 +231,7 @@ partition test vals = (filter test vals, filter (not . test) vals)
 --   -- trace ("eliminated: " ++ bindName) (return ())
 --   return (nonMatchingBindings, skEnv)
 
-elimBinding :: HasCallStack => ASTLoc -> String -> Type -> TypeCheckerEnv -> TypeCheckerResult TypeCheckerEnv
+elimBinding :: (HasCallStack) => ASTLoc -> String -> Type -> TypeCheckerEnv -> TypeCheckerResult TypeCheckerEnv
 elimBinding loc name _ ([], _) = do
   -- trace ("eliminating: " ++ name ++ " in empty env") (return ())
   throwError (LinearVarNotUsed loc name undefined)
@@ -273,19 +276,34 @@ tupleConstructorHelper _ = Nothing
 pattern TupleConstructor :: Int -> String
 pattern TupleConstructor n <- (tupleConstructorHelper -> Just n)
 
-makeTupleConstructor :: Int -> TypeCheckerResult Type
-makeTupleConstructor n = do
-  tyNameStrs <- replicateM n genTypeName
-  let varNames = map FreshVarName tyNameStrs
-  let tyNames = map TyVar varNames
-  return (TySchema [FreshVarName "_secret_:a", FreshVarName "_secret_:b"] (TyFrac (AbstractVar $ FreshVarName "_secret_:a") (VarAddress $ FreshVarName "_secret_:b") (TySchema varNames (TyArrow (CaptureEnv []) tyNames (tuple tyNames)))))
+tyListToTuple :: [Type] -> Type
+tyListToTuple [ty] = ty
+tyListToTuple tys = tuple tys
+
+curriedFunction :: [Type] -> Type -> Type
+curriedFunction [argTy] rTy = TyArrow argTy rTy
+curriedFunction (argTy:argTys) rTy = TyArrow argTy (curriedFunctionHelper argTys rTy)
+  where curriedFunctionHelper :: [Type] -> [Type] -> Type -> Type
+        curriedFunctionHelper envTy [argTy] rTy = ClosureOnce (tyListToTuple envTy) argTy rTy
+        curriedFunctionHelper envTy (argTy:argTys) rTy = ClosureOnce (tyListToTuple envTy) argTy (curriedFunctionHelper argTy:envTy argTys rTy)
+
+tupleFunction :: [Type] -> Type -> Type
+tupleFunction [argTy] rTy = TyArrow argTy rTy
+tupleFunction argTys rTy = TyArrow (tuple argTys) rTy
+
+-- makeTupleConstructor :: Int -> TypeCheckerResult Type
+-- makeTupleConstructor n = do
+--   tyNameStrs <- replicateM n genTypeName
+--   let varNames = map FreshVarName tyNameStrs
+--   let tyNames = map TyVar varNames
+--   return $ TySchema varNames (curriedFunction tyNames (tuple tyNames))
 
 lookupConstructor :: ASTLoc -> TypeCheckerEnv -> String -> TypeCheckerResult Type
 -- lookupConstructor env constructorName | constructorName `startsWith` "Tuple:" = undefined
 lookupConstructor loc _ (TupleConstructor n) = return $ tupleConstructor n
 lookupConstructor loc (env, _) constructorName = case lookup constructorName env of
-  Just ty@(TySchema _ (TyFrac _ _ (TyArrow (CaptureEnv []) _ _))) -> return ty
-  Just ty -> error $ "not a constructor: " ++ pretty ty--throwError (NotAConstructor constructorName ty)
+  Just ty@(TySchema _ (TyFrac _ _ (TyArrow _ _))) -> return ty
+  Just ty -> error $ "not a constructor: " ++ pretty ty -- throwError (NotAConstructor constructorName ty)
   Nothing -> throwError (UnknownConstructor loc constructorName)
 
 -- unifyApplication :: Type -> [Term] -> Type
@@ -303,21 +321,22 @@ inferParams env =
 
 genQNamesForFunc :: [VarName] -> [Type] -> [VarName]
 genQNamesForFunc = foldr (map . flip genQName)
+
 -- functionFromArgs paramTypes = let qNames = genQNamesForFunc ["a", "b", "c", "d"] paramTypes
 
 functionFromArgs :: [Type] -> Type
-functionFromArgs paramTypes = let qNames = genQNamesForFunc (map FreshVarName ["a", "b", "c", "d"]) paramTypes
-                                  a:b:c:[d] = qNames in
-                              TySchema qNames (TyFrac (AbstractVar c) (VarAddress d) (TyArrow (CaptureEnvVar a) paramTypes (TyVar b)))
+functionFromArgs paramTypes = undefined {- let qNames = genQNamesForFunc (map FreshVarName ["a", "b", "c", "d"]) paramTypes
+                                            a:b:c:[d] = qNames in
+                                        TySchema qNames (TyFrac (AbstractVar c) (VarAddress d) (TyArrow (CaptureEnvVar a) paramTypes (TyVar b))) -}
 
 functionFromReturnType :: Int -> Type -> TypeCheckerResult Type
-functionFromReturnType arity returnTy = do
-  tyNameStrs <- replicateM arity genTypeName <&> map FreshVarName
-  let tyNames = map TyVar tyNameStrs
-  let a = FreshVarName "a"
-  let b = FreshVarName "b"
-  let c = FreshVarName "c"
-  return (TySchema ([a, b, c] ++ tyNameStrs) (TyFrac (AbstractVar a) (VarAddress b) (TyArrow (CaptureEnvVar c) tyNames returnTy)))
+functionFromReturnType arity returnTy = undefined {- do
+                                                  tyNameStrs <- replicateM arity genTypeName <&> map FreshVarName
+                                                  let tyNames = map TyVar tyNameStrs
+                                                  let a = FreshVarName "a"
+                                                  let b = FreshVarName "b"
+                                                  let c = FreshVarName "c"
+                                                  return (TySchema ([a, b, c] ++ tyNameStrs) (TyFrac (AbstractVar a) (VarAddress b) (TyArrow (CaptureEnvVar c) tyNames returnTy))) -}
 
 liftUnificationResult :: ASTLoc -> OverallUnificationResult a -> TypeCheckerResult a
 liftUnificationResult loc x = liftUnificationResultHelper loc x
@@ -327,6 +346,7 @@ liftUnificationResultHelper loc (Right val) = return val
 liftUnificationResultHelper loc (Left (ty1, ty2, UnificationError.Circularity)) = throwError $ CircularUnification loc
 liftUnificationResultHelper loc (Left (ty1, ty2, UnificationError.TypeMismatch innerTy1 innerTy2)) = throwError $ UnificationError loc ty1 ty2 innerTy1 innerTy2
 liftUnificationResultHelper loc (Left (ty1, ty2, UnificationError.AddressMismatch addr1 addr2)) = throwError $ AddressMismatch loc addr1 addr2
+
 -- liftUnificationResultHelper loc (Left (UnificationError.FracMismatch frac1 frac2)) = throwError $ FracMismatch loc frac1 frac2
 
 extendEnv :: TypeCheckerEnv -> [(String, Type)] -> TypeCheckerEnv
@@ -345,13 +365,14 @@ synthesizeBranch env targetType (Branch loc (ConstructorPattern patternLoc name 
   -- traceM ("unifying " ++ pretty constructorType ++ " with " ++ pretty ty)
   (constructorType, _) <- liftUnificationResult patternLoc (unify constructorType ty)
   synthesize (extendEnv env (zip valNames (constructorFieldTypes constructorType))) body
-  -- case constructorType of
-  --   (TySchema _ (TyFrac _ _ (TyArrow (CaptureEnv []) valTypes _))) -> do
-  --     let nullBindings = filter (eqType Unit . snd) (fst (extendEnv env (zip valNames valTypes)))
-  --     (ty, env) <- synthesize (extendEnv env (zip valNames valTypes)) body
-  --     env <- elimBindingsOptional nullBindings env
-  --     return (ty, env)
-  --   notCons -> error $ "not a constructor: " ++ pretty notCons
+
+-- case constructorType of
+--   (TySchema _ (TyFrac _ _ (TyArrow (CaptureEnv []) valTypes _))) -> do
+--     let nullBindings = filter (eqType Unit . snd) (fst (extendEnv env (zip valNames valTypes)))
+--     (ty, env) <- synthesize (extendEnv env (zip valNames valTypes)) body
+--     env <- elimBindingsOptional nullBindings env
+--     return (ty, env)
+--   notCons -> error $ "not a constructor: " ++ pretty notCons
 
 allSameBy :: (a -> a -> Bool) -> [a] -> Bool
 allSameBy _ [] = True
@@ -429,8 +450,8 @@ dropHelper :: TypeCheckerEnv -> Simple -> Type -> TypeCheckerResult (Type, TypeC
 dropHelper env term (TySchema qName ty) = do
   (ty, env) <- dropHelper env term ty
   return (TySchema qName ty, env)
-dropHelper env _ (TyFrac _ _ (TyArrow (CaptureEnv []) _ _)) = return (Unit, env)
-dropHelper _ term (TyFrac _ _ (TyArrow {})) = throwError (DropClosure (getLoc term) term)
+dropHelper env _ (TyFrac _ _ (TyArrow _ _)) = return (Unit, env)
+-- dropHelper _ term (TyFrac _ _ (TyArrow {})) = throwError (DropClosure (getLoc term) term)
 dropHelper env term (TyFrac frac _ (CooperativeRef ty)) = do
   unless (frac == AbstractNum 0 || frac == AbstractNum 1) (throwError (InvalidDrop (getLoc term) term frac))
   return (ty, env)
@@ -466,10 +487,10 @@ Non-special cased version
 --}
 
 fracTuple :: [Type] -> Type
-fracTuple ty = let
-                  tupleVal = tuple ty
-                  addr = genQName (FreshVarName "addr") tupleVal in
-                  TyExists [addr] (TyFrac (AbstractNum 1) (VarAddress addr) tupleVal)
+fracTuple ty =
+  let tupleVal = tuple ty
+      addr = genQName (FreshVarName "addr") tupleVal
+   in TyExists [addr] (TyFrac (AbstractNum 1) (VarAddress addr) tupleVal)
 
 -- reintroduceRator :: TypeCheckerEnv -> Simple -> Type -> TypeCheckerEnv
 -- reintroduceRator env (Variable rator) ratorTy = (rator, ratorTy):env
@@ -521,11 +542,8 @@ synthesize env (LetFunction pos name captures params rType funcBody body) = do
       )
       (env, [])
       captures
-  -- let paramTypes = map snd params
-  addr <- genAddress
-  let funcType = if null qNames
-                  then TyFrac (AbstractNum 1) addr (TyArrow (CaptureEnv captureTypes) (map snd params) rType)
-                  else TySchema qNames (TyFrac (AbstractNum 1) addr (TyArrow (CaptureEnv captureTypes) (map snd params) rType))
+  -- let paramTypes = map snd param
+  funcType <- makeFunctionType qNames captureTypes (tuple (map snd params)) rType
   (instanceTy, env) <- instantiateSchemaType env funcType
   -- _ <- trace (pretty funcType) (return ())
   -- _ <- trace (pretty instanceTy) (return ())
@@ -549,8 +567,8 @@ synthesize env (LetRecFunction pos name captures params rType funcBody body) = d
       (env, [])
       captures
   -- let paramTypes = map snd params
-  addr <- genAddress
-  let funcType = TySchema qNames (TyFrac (AbstractNum 1) addr (TyArrow (CaptureEnv captureTypes) (map snd params) rType))
+  funcType <- makeFunctionType qNames captureTypes (tuple (map snd params)) rType
+  -- let funcType = TySchema qNames (TyFrac (AbstractNum 1) addr (TyArrow (CaptureEnv captureTypes) (map snd params) rType))
   -- traceM ("letrec raw func type: " ++ pretty funcType)
   -- let funcType = TySchema qNames (TyFrac (AbstractNum 1) addr (TyArrow (CaptureEnv captureTypes) (map snd params) rType))
   (instanceTy, env) <- instantiateSchemaType env funcType
@@ -577,7 +595,9 @@ synthesize env (Thunk pos captures body) = do
       )
       (env, [])
       captures
-  return (TyArrow (CaptureEnv captureTypes) [Unit] thunkType, env)
+  funcTy <- makeFunctionType [] captureTypes Unit thunkType
+  return (funcTy, env)
+-- return (TyArrow (CaptureEnv captureTypes) [Unit] thunkType, env)
 synthesize _ term@(Case pos _ []) = throwError (EmptyCase pos term)
 synthesize env term@(Case pos target branches) = do
   (targetType, env) <- synthesizeSimple env target
@@ -590,8 +610,9 @@ synthesize env term@(Case pos target branches) = do
   -- unless (allSameEnv branchEnvs) (throwError (CaseBodyEnvMismatch pos term (zip (map getBranchLoc branches) branchEnvs)))
   checkBranchEnvs pos term (zip (map getBranchLoc branches) branchEnvs)
   return (head branchTypes, head branchEnvs)
-  where getBranchLoc :: Branch -> ASTLoc
-        getBranchLoc (Branch loc _ _) = loc
+  where
+    getBranchLoc :: Branch -> ASTLoc
+    getBranchLoc (Branch loc _ _) = loc
 synthesize env (LetPattern pos (WildCardPattern _ name) val body) = do
   (valType, env) <- synthesize env val
   synthesize (extendEnv1 env (name, valType)) body
@@ -604,14 +625,13 @@ synthesize env (LetPattern pos (ConstructorPattern patternLoc constructorName va
   -- trace (show constructorType) (return ())
   -- traceM ("constructor: " ++ pretty constructorType ++ " genned fun: " ++ pretty gennedFun)
   (constructorType, _) <- liftUnificationResult patternLoc (unify constructorType gennedFun)
-
   synthesize (extendEnv env (zip valNames (constructorFieldTypes constructorType))) body
-  -- let pparamTypes
-  -- trace (show constructorType) (return ())
-  -- case constructorType of
-  --   (TyFrac _ _ (TyArrow (CaptureEnv []) valTypes _)) -> synthesize (extendEnv env (zip valNames valTypes)) body
-  --   (TySchema _ (TyFrac _ _ (TyArrow (CaptureEnv []) valTypes _))) -> synthesize (extendEnv env (zip valNames valTypes)) body
-  --   notCons -> error $ "not a constructor (in let): " ++ pretty notCons
+-- let pparamTypes
+-- trace (show constructorType) (return ())
+-- case constructorType of
+--   (TyFrac _ _ (TyArrow (CaptureEnv []) valTypes _)) -> synthesize (extendEnv env (zip valNames valTypes)) body
+--   (TySchema _ (TyFrac _ _ (TyArrow (CaptureEnv []) valTypes _))) -> synthesize (extendEnv env (zip valNames valTypes)) body
+--   notCons -> error $ "not a constructor (in let): " ++ pretty notCons
 {--
 
 ∀ a0, b0.Frac<[(["a0"],1 % 1)], VarAddress "b0",
@@ -685,7 +705,7 @@ synthesize env (DataTypeDeclaration pos tyName qNamesRaw constructors body) = do
                     if null params
                       then [Unit]
                       else params
-                  constructorTy = TyArrow (CaptureEnv []) paramTys returnType
+                  constructorTy = tupleFunction paramTys returnType
                in (name, TySchema qNames (TyFrac (AbstractNum 1) constructorAddr constructorTy))
           )
           constructors
@@ -712,16 +732,16 @@ synthesize env (Share pos eRef) = do
     (TyFrac frac@(AbstractFrac (Just 1) []) address (TyApp (TyCon "CooperativeRef") ty)) -> return (TyFrac frac address (TyApp refType ty), env)
     (TyFrac frac _ _) -> throwError (SharePartialRef pos eRef frac)
     notRef -> throwError (NotARef pos notRef eRef)
-synthesize env (UnClos pos eClos) = do
-  (clos, env) <- synthesizeSimple env eClos
-  unClosHelper env clos
-  where
-    unClosHelper :: TypeCheckerEnv -> Type -> TypeCheckerResult (Type, TypeCheckerEnv)
-    unClosHelper env (TySchema _ ty) = unClosHelper env ty
-    unClosHelper env (TyFrac (AbstractFrac (Just 1) []) _ (TyArrow closEnv@(CaptureEnv captures) _ _)) = return (tuple captures, env)
-    unClosHelper env (TyFrac _ _ (TyArrow closEnv@(CaptureEnvVar _) _ _)) = throwError (UnClosPolyEnv pos eClos closEnv)
-    -- unClosHelper env (TyFrac _ _ (TyArrow closEnv@(CaptureEnvVar _) _ _)) = throwError (UnClosPartial pos eClos)
-    unClosHelper env notRef = throwError (NotAClosure pos notRef eClos)
+-- synthesize env (UnClos pos eClos) = do
+--   (clos, env) <- synthesizeSimple env eClos
+--   unClosHelper env clos
+--   where
+--     unClosHelper :: TypeCheckerEnv -> Type -> TypeCheckerResult (Type, TypeCheckerEnv)
+--     unClosHelper env (TySchema _ ty) = unClosHelper env ty
+--     unClosHelper env (TyFrac (AbstractFrac (Just 1) []) _ (TyArrow closEnv@(CaptureEnv captures) _ _)) = return (tuple captures, env)
+--     unClosHelper env (TyFrac _ _ (TyArrow closEnv@(CaptureEnvVar _) _ _)) = throwError (UnClosPolyEnv pos eClos closEnv)
+--     -- unClosHelper env (TyFrac _ _ (TyArrow closEnv@(CaptureEnvVar _) _ _)) = throwError (UnClosPartial pos eClos)
+--     unClosHelper env notRef = throwError (NotAClosure pos notRef eClos)
 synthesize env (Acquire pos ref name body) = do
   (refType, env) <- synthesizeSimple env ref
   case refType of
@@ -752,7 +772,7 @@ synthesize env (Unabstract pos e) = do
   addr <- genAddress
   case refTy of
     TyExists [qName] (TyFrac frac (VarAddress addrVar) ty) | addrVar == qName -> return (TyFrac frac addr ty, env)
-    -- other -> error $ "other: " ++ show other
+-- other -> error $ "other: " ++ show other
 synthesize env (Rebalance pos (e : es)) = do
   (ty, env) <- synthesizeSimple env e
   case ty of
@@ -769,9 +789,23 @@ synthesize env (Rebalance pos (e : es)) = do
         (TyFrac frac eAddr _)
           | eAddr /= addr -> throwError (AddressMismatch pos addr eAddr)
           | otherwise -> rebalanceHelper addr env es >>= \(env, newFrac) -> return (env, frac |+| newFrac)
--- synthesize env (TypeSynonym pos name qNames ty body) = do
---   synthesize env body
 
+newOwned :: Type -> TypeCheckerResult Type
+newOwned ty = do
+  addr <- genAddress
+  return $ TyFrac (AbstractNum 1) addr ty
+
+makeFunctionType :: [VarName] -> [Type] -> Type -> Type -> TypeCheckerResult Type
+makeFunctionType qNames captureTys paramTy rType = do
+  inner <- case captureTys of
+    [] -> return $ TyArrow paramTy rType
+    [captureTy] -> newOwned (Closure captureTy paramTy rType)
+    captureTys -> newOwned (Closure (tuple captureTys) paramTy rType)
+  return $ qNamesHelper qNames inner
+  where
+    qNamesHelper :: [VarName] -> Type -> Type
+    qNamesHelper [] ty = ty
+    qNamesHelper qNames ty = TySchema qNames ty
 
 mergeHelper :: TypeCheckerEnv -> Type -> Simple -> TypeCheckerResult (Type, TypeCheckerEnv)
 mergeHelper env (TyFrac frac1 addr refTy) e = do
@@ -862,18 +896,19 @@ check env ty term = do
   (actualTy, env) <- synthesize env term
   if actualTy `eqType` ty then return (actualTy, env) else throwError (TypeMismatch (getLoc term) actualTy ty)
 
-basicFunc :: [Type] -> Type -> Type
-basicFunc paramTys returnTy = funcHelper (TyArrow (CaptureEnv []) paramTys returnTy)
+-- basicFunc :: [Type] -> Type -> Type
+-- basicFunc paramTys returnTy = funcHelper (TyArrow paramTys returnTy)
 
-funcHelper :: Type -> Type
-funcHelper ty = let a = genQName' "a" ty
-                    b = genQName' "b" ty in
-                TySchema [a, b] (TyFrac (AbstractVar a) (VarAddress b) ty)
+-- funcHelper :: Type -> Type
+-- funcHelper ty =
+--   let a = genQName' "a" ty
+--       b = genQName' "b" ty
+--    in TySchema [a, b] (TyFrac (AbstractVar a) (VarAddress b) ty)
 
 -- basicConstructor
 
 binNumFunc :: Type
-binNumFunc = basicFunc [number, number] number
+binNumFunc = curriedFunction [number, number] number
 
 -- cons :: Type
 -- cons = TySchema ["a", "b", "c"] (TyFrac (AbstractVar "b") (VarAddress "c") (TyArrow (CaptureEnv []) [TyVar "a", TyApp (TyCon "List") [TyVar "a"]] (TyApp (TyCon "List") [TyVar "a"])))
@@ -882,26 +917,27 @@ binNumFunc = basicFunc [number, number] number
 -- nil = TySchema ["a", "b", "c"] (TyFrac (AbstractVar "b") (VarAddress "c") (TyArrow (CaptureEnv []) [Unit] (TyApp (TyCon "List") [TyVar "a"])))
 
 baseFunctions :: [(String, Type)]
-baseFunctions = [("+", binNumFunc), ("-", binNumFunc), ("*", binNumFunc), ("/", binNumFunc)]--, ("Cons", cons), ("Nil", nil)]
+baseFunctions = [("+", binNumFunc), ("-", binNumFunc), ("*", binNumFunc), ("/", binNumFunc)] -- , ("Cons", cons), ("Nil", nil)]
 
 wrapExistentialFrac :: Type -> Type
 wrapExistentialFrac ty = let addr = genQName' "addr" ty in TyExists [addr] (TyFrac (AbstractNum 1) (VarAddress addr) ty)
 
-simpleFunc :: [Type] -> Type -> Type
-simpleFunc paramTys returnTy = TyArrow (CaptureEnv []) paramTys returnTy
+-- simpleFunc :: [Type] -> Type -> Type
+-- simpleFunc paramTys returnTy = TyArrow paramTys returnTy
 
 numToLetter :: Int -> String
 numToLetter n = "a" ++ show n
 
 tupleConstructor :: Int -> Type
-tupleConstructor n = let qNames = map (FreshVarName . numToLetter) [1..n]
-                         qVars = map TyVar qNames in
-                      funcHelper (TySchema qNames (simpleFunc qVars (wrapExistentialFrac (tuple qVars))))
+tupleConstructor n =
+  let qNames = map (FreshVarName . numToLetter) [1 .. n]
+      qVars = map TyVar qNames
+   in TySchema qNames (curriedFunction qVars (wrapExistentialFrac (tuple qVars)))
 
-twopleConstructor = tupleConstructor 2
+-- twopleConstructor = tupleConstructor 2
 
 baseConstructors :: [(String, Type)]
-baseConstructors = []--[("Nil", funcHelper (TySchema ["a"] (TyArrow (CaptureEnv []) [Unit] (TyExists ["addr"] (TyApp (TyCon "List") [TyVar "a"])))))]
+baseConstructors = [] -- [("Nil", funcHelper (TySchema ["a"] (TyArrow (CaptureEnv []) [Unit] (TyExists ["addr"] (TyApp (TyCon "List") [TyVar "a"])))))]
 
 baseTypeBindings :: [(String, Type)]
 baseTypeBindings = baseFunctions ++ baseConstructors
@@ -941,9 +977,8 @@ runTypeChecker res = case evalStateT res 0 of
 
 transpileAndCheck :: File -> ASTNode -> TypeCheckerResult Type
 transpileAndCheck file program = case transpileProgram file program of
-                          (Left err) -> throwError (convertTypeTranspilerError err)
-                          (Right program) -> checkProgram program
-
+  (Left err) -> throwError (convertTypeTranspilerError err)
+  (Right program) -> checkProgram program
 
 checkFile :: String -> IO String
 checkFile fileName = do

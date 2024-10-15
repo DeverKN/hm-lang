@@ -55,10 +55,10 @@ transpileType loc env ty@(RawTyCon s) = do
     AliasType args _ -> throwError (WrongArity loc ty (length args) [])
     DataType args -> throwError (WrongArity loc ty (length args) [])
 transpileType loc _ (RawTyVar n) = return (TyVar n)
-transpileType loc tyEnv (RawTyArrow env params rType) = do
-  params <- mapM (transpileType loc tyEnv) params
+transpileType loc tyEnv (RawTyArrow params rType) = do
+  params <- transpileType loc tyEnv params
   rType <- transpileType loc tyEnv rType
-  return (TyArrow env params rType)
+  return (TyArrow params rType)
 transpileType loc tyEnv rawTy@(RawTyApp rawTyRator@(RawTyCon rator) rawTyRands) = do
   ratorDescriptor <- lookupTy loc tyEnv rator
   tyRands <- mapM (transpileType loc tyEnv) rawTyRands
@@ -145,7 +145,7 @@ getFreeVariables (SemicolonNode _ node1 node2) = getFreeVariables node1 `merge` 
 getFreeVariables (LiteralNode _ lit) = getFreeVariablesLiteral lit
 getFreeVariables (CaptureNode _ lit) = getFreeVariablesLiteral lit
 getFreeVariables (TupleIndexNode _ tuple index) = getFreeVariablesLiteral tuple `merge` getFreeVariablesLiteral index
-getFreeVariables (UnClosNode _ clos) = getFreeVariablesLiteral clos --`merge` foldr (merge . getFreeVariablesLiteral) [] holders
+-- getFreeVariables (UnClosNode _ clos) = getFreeVariablesLiteral clos --`merge` foldr (merge . getFreeVariablesLiteral) [] holders
 getFreeVariables (ApplicationNode _ rator rands) = getFreeVariablesLiteral rator `merge` foldr (merge . getFreeVariablesArgument) [] rands
 getFreeVariables (ParallelNode _ branches) = foldr (merge . getFreeVariables) [] branches
 getFreeVariables (DataNode _ _ _ constructors body) = getFreeVariables body `minus` map fst constructors
@@ -284,11 +284,11 @@ transpile tyEnv (LiteralNode pos lit) = do
   return $ Literal pos lit
 transpile tyEnv (CaptureNode _ _) = error "CaptureNode not allowed"
 transpile tyEnv (TupleIndexNode _ tuple index) = error "Tuple indexing notation is currently unsupported"
-transpile tyEnv (UnClosNode pos clos) = do
-  pos <- convertPos pos
-  -- holders <- mapM transpileLiteral holders
-  clos <- transpileLiteral clos
-  return $ UnClos pos clos
+-- transpile tyEnv (UnClosNode pos clos) = do
+--   pos <- convertPos pos
+--   -- holders <- mapM transpileLiteral holders
+--   clos <- transpileLiteral clos
+--   return $ UnClos pos clos
 transpile tyEnv (ApplicationNode pos rator rands) = do
   pos <- convertPos pos
   rator <- transpileLiteral rator
